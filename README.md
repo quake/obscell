@@ -1,6 +1,12 @@
-# obscell
+# obscell (obscure + cell)
 
-TODO: Write this readme
+This repository implements a **Stealth Address** and **Confidential Transaction (CT) Token** on Nervos CKB, combining three scripts to enable privacy-preserving token issuance and transfers:
+
+1. **Stealth Lock** – hides recipient addresses
+2. **CT Info Type** – manages global issuance and minting
+3. **CT Token Type** – validates per-cell token transfers
+
+Together, they provide a privacy-enhanced UTXO token system that supports confidential amounts, stealth addresses, and controlled minting.
 
 *This project was bootstrapped with [ckb-script-templates].*
 

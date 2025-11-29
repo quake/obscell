@@ -5,6 +5,8 @@ members = [
   # Please don't remove the following line, we use it to automatically
   # detect insertion point for newly generated crates.
   # @@INSERTION_POINT@@
+  "contracts/ct-token-type",
+  "contracts/ct-info-type",
   "contracts/stealth-lock",
   "tests",
 ]

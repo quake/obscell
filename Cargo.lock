@@ -870,6 +870,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ct-info-type"
+version = "0.1.0"
+dependencies = [
+ "ckb-std",
+]
+
+[[package]]
+name = "ct-token-type"
+version = "0.1.0"
+dependencies = [
+ "ckb-std",
+]
+
+[[package]]
 name = "cty"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
