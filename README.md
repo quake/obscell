@@ -8,6 +8,8 @@ This repository implements a **Stealth Address** and **Confidential Transaction 
 
 Together, they provide a privacy-enhanced UTXO token system that supports confidential amounts, stealth addresses, and controlled minting.
 
+TODO: CT Info Type and CT Token Type scripts should be merged into a single script. Working in progress. Not yet ready for release source code.
+
 *This project was bootstrapped with [ckb-script-templates].*
 
 [ckb-script-templates]: https://github.com/cryptape/ckb-script-templates
