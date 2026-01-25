@@ -12,7 +12,7 @@ use curve25519_dalek::scalar::Scalar;
 use merlin::Transcript;
 use rand_core::OsRng;
 
-use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey};
 use secp256k1::{Message, PublicKey, Secp256k1, SecretKey};
 
 #[test]
@@ -212,13 +212,19 @@ fn test_ct_info_mint_basic() {
         .type_(Some(type_script))
         .build()];
 
+    // Add cell deps
+    let cell_deps = vec![CellDep::new_builder().out_point(out_point).build()].pack();
+
     let tx = TransactionBuilder::default()
+        .cell_deps(cell_deps)
         .input(input)
         .outputs(outputs)
         .outputs_data(vec![output_data].pack())
         .build();
 
-    // Sign the transaction
+    let tx = context.complete_tx(tx);
+
+    // Sign the transaction (must be after complete_tx to get correct tx_hash)
     let tx_hash = tx.hash().raw_data();
     let mut message = Vec::new();
     message.extend_from_slice(&tx_hash);
@@ -227,15 +233,13 @@ fn test_ct_info_mint_basic() {
     let signature: Signature = signing_key.sign(&message);
 
     let witness_args = WitnessArgs::new_builder()
-        .input_type(Some(signature.to_bytes().to_vec().into()))
+        .input_type(Some(Bytes::from(signature.to_bytes().to_vec())))
         .build();
 
     let tx = tx
         .as_advanced_builder()
-        .witness(witness_args.as_bytes())
+        .set_witnesses(vec![witness_args.as_bytes().pack()])
         .build();
-
-    let tx = context.complete_tx(tx);
 
     let cycles = context
         .verify_tx(&tx, 20_000_000)
@@ -295,11 +299,17 @@ fn test_ct_info_mint_exceed_cap() {
         .type_(Some(type_script))
         .build()];
 
+    // Add cell deps
+    let cell_deps = vec![CellDep::new_builder().out_point(out_point).build()].pack();
+
     let tx = TransactionBuilder::default()
+        .cell_deps(cell_deps)
         .input(input)
         .outputs(outputs)
         .outputs_data(vec![output_data].pack())
         .build();
+
+    let tx = context.complete_tx(tx);
 
     let tx_hash = tx.hash().raw_data();
     let mut message = Vec::new();
@@ -309,15 +319,13 @@ fn test_ct_info_mint_exceed_cap() {
     let signature: Signature = signing_key.sign(&message);
 
     let witness_args = WitnessArgs::new_builder()
-        .input_type(Some(signature.to_bytes().to_vec().into()))
+        .input_type(Some(Bytes::from(signature.to_bytes().to_vec())))
         .build();
 
     let tx = tx
         .as_advanced_builder()
-        .witness(witness_args.as_bytes())
+        .set_witnesses(vec![witness_args.as_bytes().pack()])
         .build();
-
-    let tx = context.complete_tx(tx);
 
     // Should fail with SupplyCapExceeded
     let result = context.verify_tx(&tx, 20_000_000);
@@ -371,7 +379,11 @@ fn test_ct_info_mint_without_signature() {
         .type_(Some(type_script))
         .build()];
 
+    // Add cell deps
+    let cell_deps = vec![CellDep::new_builder().out_point(out_point).build()].pack();
+
     let tx = TransactionBuilder::default()
+        .cell_deps(cell_deps)
         .input(input)
         .outputs(outputs)
         .outputs_data(vec![output_data].pack())
