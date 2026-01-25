@@ -8,9 +8,9 @@ use bulletproofs::{BulletproofGens, PedersenGens, RangeProof};
 use ckb_std::{
     ckb_constants::Source,
     error::SysError,
-    high_level::{QueryIter, load_cell_data, load_tx_hash, load_witness_args},
+    high_level::{load_cell_data, load_tx_hash, load_witness_args, QueryIter},
 };
-use curve25519_dalek::{RistrettoPoint, ristretto::CompressedRistretto};
+use curve25519_dalek::{ristretto::CompressedRistretto, RistrettoPoint};
 use merlin::Transcript;
 
 #[cfg(not(any(feature = "library", test)))]
@@ -36,6 +36,7 @@ pub enum Error {
     InputOutputSumMismatch,
     InvalidRangeProofWitnessFormat,
     InvalidRangeProof,
+    InvalidMintCommitment,
 }
 
 impl From<SysError> for Error {
@@ -85,8 +86,32 @@ fn auth() -> Result<(), Error> {
         value_commitments.push(cr);
     }
 
-    if input_sum != output_sum {
-        return Err(Error::InputOutputSumMismatch);
+    // Check for mint commitment in witness
+    // If ct-info-type is present, it will provide mint_commitment in witness[0].input_type
+    let witness_args = load_witness_args(0, Source::GroupOutput)?;
+    let mint_commitment_opt = witness_args.input_type().to_opt();
+
+    if let Some(mint_commitment_bytes) = mint_commitment_opt {
+        // This is a mint transaction
+        let mint_commitment_data = mint_commitment_bytes.raw_data();
+        if mint_commitment_data.len() != 32 {
+            return Err(Error::InvalidMintCommitment);
+        }
+
+        let mint_commitment = CompressedRistretto::from_slice(&mint_commitment_data)
+            .ok()
+            .and_then(|cr| cr.decompress())
+            .ok_or(Error::InvalidMintCommitment)?;
+
+        // For mint: input_sum + mint_commitment == output_sum
+        if input_sum + mint_commitment != output_sum {
+            return Err(Error::InputOutputSumMismatch);
+        }
+    } else {
+        // Regular transfer: input_sum == output_sum
+        if input_sum != output_sum {
+            return Err(Error::InputOutputSumMismatch);
+        }
     }
 
     let witness_args = load_witness_args(0, Source::GroupOutput)?
