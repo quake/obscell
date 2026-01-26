@@ -8,9 +8,11 @@ use alloc::vec::Vec;
 use ckb_std::{
     ckb_constants::Source,
     error::SysError,
-    high_level::{load_cell_data, load_tx_hash, load_witness_args, QueryIter},
+    high_level::{QueryIter, load_cell_data, load_tx_hash, load_witness_args},
 };
-use curve25519_dalek::{constants::RISTRETTO_BASEPOINT_POINT, scalar::Scalar};
+use curve25519_dalek::{
+    constants::RISTRETTO_BASEPOINT_POINT, ristretto::CompressedRistretto, scalar::Scalar,
+};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 
 #[cfg(not(any(feature = "library", test)))]
@@ -239,14 +241,36 @@ fn verify_issuer_signature(input_info: &CtInfoData, output_info: &CtInfoData) ->
 }
 
 fn compute_mint_commitment(minted_amount: u128) -> Result<(), Error> {
-    // Create commitment: minted_amount * G + 0 * H
+    // Create expected commitment: minted_amount * G + 0 * H
     // We use zero blinding factor because mint amounts are public
     let amount_scalar = Scalar::from(minted_amount);
-    let _mint_commitment = RISTRETTO_BASEPOINT_POINT * amount_scalar;
+    let expected_commitment = RISTRETTO_BASEPOINT_POINT * amount_scalar;
 
-    // Note: The commitment is computed off-chain when constructing the transaction
-    // and stored in witness.output_type for ct-token-type to verify
-    // This function just validates that the minted amount is reasonable
+    // Load mint_commitment from witness[0].output_type (same witness as signature)
+    // This allows ct-info-type to work independently while still providing
+    // the commitment that ct-token-type can also verify
+    let witness_args = load_witness_args(0, Source::GroupInput)?;
+    let commitment_bytes = witness_args
+        .output_type()
+        .to_opt()
+        .ok_or(Error::WitnessFormatError)?
+        .raw_data();
+
+    if commitment_bytes.len() != 32 {
+        return Err(Error::InvalidMintCommitment);
+    }
+
+    // Parse and decompress the commitment from witness
+    let actual_commitment = CompressedRistretto::from_slice(&commitment_bytes)
+        .ok()
+        .and_then(|cr| cr.decompress())
+        .ok_or(Error::InvalidMintCommitment)?;
+
+    // Verify that the commitment in witness matches the expected commitment
+    // based on the minted amount
+    if actual_commitment != expected_commitment {
+        return Err(Error::InvalidMintCommitment);
+    }
 
     Ok(())
 }
