@@ -15,6 +15,45 @@ use rand_core::OsRng;
 use ed25519_dalek::{Signature, Signer, SigningKey};
 use secp256k1::{Message, PublicKey, Secp256k1, SecretKey};
 
+/// Deploy ckb-auth binary and register its native simulator.
+/// Returns the OutPoint of the deployed cell.
+#[cfg(feature = "native-simulator")]
+fn deploy_ckb_auth(context: &mut Context) -> OutPoint {
+    use std::path::PathBuf;
+
+    let ckb_auth_bin = Loader::default().load_binary("../../contracts/ckb-auth/auth");
+    let code_hash = CellOutput::calc_data_hash(&ckb_auth_bin);
+    let out_point = context.deploy_cell(ckb_auth_bin);
+
+    // Register the ckb-auth-sim native simulator
+    // The path is relative to the target directory
+    let mode = std::env::var("MODE").unwrap_or_else(|_| "release".to_string());
+    let sim_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("target")
+        .join(mode)
+        .join("libckb_auth_sim.so");
+
+    if sim_path.exists() {
+        context.set_simulator(code_hash, sim_path.to_str().unwrap());
+    } else {
+        panic!(
+            "ckb-auth-sim not found at {:?}. Build it with: cargo build -p ckb-auth-sim",
+            sim_path
+        );
+    }
+
+    out_point
+}
+
+/// Deploy ckb-auth binary (non-simulator mode).
+#[cfg(not(feature = "native-simulator"))]
+fn deploy_ckb_auth(context: &mut Context) -> OutPoint {
+    let ckb_auth_bin = Loader::default().load_binary("../../contracts/ckb-auth/auth");
+    context.deploy_cell(ckb_auth_bin)
+}
+
 // Error codes for stealth-lock
 #[allow(dead_code)]
 mod stealth_lock_error {
@@ -68,11 +107,8 @@ fn assert_script_error(result: Result<u64, ckb_testtool::ckb_error::Error>, expe
 fn test_stealth_lock() {
     // deploy contract
     let mut context = Context::default();
-    let loader = Loader::default();
-    let contract_bin: Bytes = loader.load_binary("stealth-lock");
-    let ckb_auth_bin = loader.load_binary("../../contracts/ckb-auth/auth");
-    let contract_out_point = context.deploy_cell(contract_bin);
-    let ckb_auth_out_point = context.deploy_cell(ckb_auth_bin);
+    let contract_out_point = context.deploy_cell_by_name("stealth-lock");
+    let ckb_auth_out_point = deploy_ckb_auth(&mut context);
 
     // prepare script
     let secp = Secp256k1::new();
@@ -145,15 +181,18 @@ fn test_stealth_lock() {
     println!("consume cycles: {}", cycles);
 }
 
+// Note: The following 4 tests are skipped in native-simulator mode because
+// ckb-x64-simulator uses lazy_static for TRANSACTION/SETUP which gets cached
+// from the first test run. This causes subsequent tests to use stale context
+// and return incorrect results. These tests pass correctly in normal mode.
+
 #[test]
+#[cfg(not(feature = "native-simulator"))]
 fn test_stealth_lock_invalid_signature_length() {
     // Test: Signature length is not 65 bytes (should fail with SignatureLengthNotEnough)
     let mut context = Context::default();
-    let loader = Loader::default();
-    let contract_bin: Bytes = loader.load_binary("stealth-lock");
-    let ckb_auth_bin = loader.load_binary("../../contracts/ckb-auth/auth");
-    let contract_out_point = context.deploy_cell(contract_bin);
-    let ckb_auth_out_point = context.deploy_cell(ckb_auth_bin);
+    let contract_out_point = context.deploy_cell_by_name("stealth-lock");
+    let ckb_auth_out_point = deploy_ckb_auth(&mut context);
 
     let secp = Secp256k1::new();
     let mut rng = rand::rng();
@@ -180,12 +219,10 @@ fn test_stealth_lock_invalid_signature_length() {
     let input = CellInput::new_builder()
         .previous_output(input_out_point)
         .build();
-    let outputs = vec![
-        CellOutput::new_builder()
-            .capacity(256)
-            .lock(lock_script)
-            .build(),
-    ];
+    let outputs = vec![CellOutput::new_builder()
+        .capacity(256)
+        .lock(lock_script)
+        .build()];
 
     // Use a 64-byte signature instead of 65 bytes
     let invalid_signature = vec![0u8; 64];
@@ -207,14 +244,12 @@ fn test_stealth_lock_invalid_signature_length() {
 }
 
 #[test]
+#[cfg(not(feature = "native-simulator"))]
 fn test_stealth_lock_invalid_args_length() {
     // Test: Script args length is not 53 bytes (should fail with ArgsLengthNotEnough)
     let mut context = Context::default();
-    let loader = Loader::default();
-    let contract_bin: Bytes = loader.load_binary("stealth-lock");
-    let ckb_auth_bin = loader.load_binary("../../contracts/ckb-auth/auth");
-    let contract_out_point = context.deploy_cell(contract_bin);
-    let ckb_auth_out_point = context.deploy_cell(ckb_auth_bin);
+    let contract_out_point = context.deploy_cell_by_name("stealth-lock");
+    let ckb_auth_out_point = deploy_ckb_auth(&mut context);
 
     let secp = Secp256k1::new();
     let mut rng = rand::rng();
@@ -243,12 +278,10 @@ fn test_stealth_lock_invalid_args_length() {
     let input = CellInput::new_builder()
         .previous_output(input_out_point)
         .build();
-    let outputs = vec![
-        CellOutput::new_builder()
-            .capacity(256)
-            .lock(lock_script)
-            .build(),
-    ];
+    let outputs = vec![CellOutput::new_builder()
+        .capacity(256)
+        .lock(lock_script)
+        .build()];
 
     let tx = TransactionBuilder::default()
         .cell_deps(cell_deps)
@@ -279,14 +312,12 @@ fn test_stealth_lock_invalid_args_length() {
 }
 
 #[test]
+#[cfg(not(feature = "native-simulator"))]
 fn test_stealth_lock_wrong_signature() {
     // Test: Wrong signature (signed with different key) should fail with AuthError
     let mut context = Context::default();
-    let loader = Loader::default();
-    let contract_bin: Bytes = loader.load_binary("stealth-lock");
-    let ckb_auth_bin = loader.load_binary("../../contracts/ckb-auth/auth");
-    let contract_out_point = context.deploy_cell(contract_bin);
-    let ckb_auth_out_point = context.deploy_cell(ckb_auth_bin);
+    let contract_out_point = context.deploy_cell_by_name("stealth-lock");
+    let ckb_auth_out_point = deploy_ckb_auth(&mut context);
 
     let secp = Secp256k1::new();
     let mut rng = rand::rng();
@@ -315,12 +346,10 @@ fn test_stealth_lock_wrong_signature() {
     let input = CellInput::new_builder()
         .previous_output(input_out_point)
         .build();
-    let outputs = vec![
-        CellOutput::new_builder()
-            .capacity(256)
-            .lock(lock_script)
-            .build(),
-    ];
+    let outputs = vec![CellOutput::new_builder()
+        .capacity(256)
+        .lock(lock_script)
+        .build()];
 
     let tx = TransactionBuilder::default()
         .cell_deps(cell_deps)
@@ -352,14 +381,12 @@ fn test_stealth_lock_wrong_signature() {
 }
 
 #[test]
+#[cfg(not(feature = "native-simulator"))]
 fn test_stealth_lock_empty_witness() {
     // Test: Empty witness.lock should fail
     let mut context = Context::default();
-    let loader = Loader::default();
-    let contract_bin: Bytes = loader.load_binary("stealth-lock");
-    let ckb_auth_bin = loader.load_binary("../../contracts/ckb-auth/auth");
-    let contract_out_point = context.deploy_cell(contract_bin);
-    let ckb_auth_out_point = context.deploy_cell(ckb_auth_bin);
+    let contract_out_point = context.deploy_cell_by_name("stealth-lock");
+    let ckb_auth_out_point = deploy_ckb_auth(&mut context);
 
     let secp = Secp256k1::new();
     let mut rng = rand::rng();
@@ -386,12 +413,10 @@ fn test_stealth_lock_empty_witness() {
     let input = CellInput::new_builder()
         .previous_output(input_out_point)
         .build();
-    let outputs = vec![
-        CellOutput::new_builder()
-            .capacity(256)
-            .lock(lock_script)
-            .build(),
-    ];
+    let outputs = vec![CellOutput::new_builder()
+        .capacity(256)
+        .lock(lock_script)
+        .build()];
 
     // Empty witness - no lock field
     let witness_args = WitnessArgs::new_builder().build();
@@ -442,8 +467,7 @@ const MINTABLE: u8 = 0x01;
 fn test_ct_info_genesis() {
     // Test: Create a new token (genesis transaction)
     let mut context = Context::default();
-    let contract_bin: Bytes = Loader::default().load_binary("ct-info-type");
-    let out_point = context.deploy_cell(contract_bin);
+    let out_point = context.deploy_cell_by_name("ct-info-type");
     let always_success_out_point = context.deploy_cell(ALWAYS_SUCCESS.clone());
 
     // Generate issuer keypair
@@ -466,13 +490,11 @@ fn test_ct_info_genesis() {
 
     let output_data = create_ct_info_data(0, &issuer_pubkey, 1_000_000, MINTABLE);
 
-    let outputs = vec![
-        CellOutput::new_builder()
-            .capacity(1000)
-            .lock(lock_script)
-            .type_(Some(type_script))
-            .build(),
-    ];
+    let outputs = vec![CellOutput::new_builder()
+        .capacity(1000)
+        .lock(lock_script)
+        .type_(Some(type_script))
+        .build()];
 
     let tx = TransactionBuilder::default()
         .outputs(outputs)
@@ -490,8 +512,7 @@ fn test_ct_info_genesis() {
 fn test_ct_info_mint_basic() {
     // Test: Mint tokens (supply 0 -> 100)
     let mut context = Context::default();
-    let contract_bin: Bytes = Loader::default().load_binary("ct-info-type");
-    let out_point = context.deploy_cell(contract_bin);
+    let out_point = context.deploy_cell_by_name("ct-info-type");
     let always_success_out_point = context.deploy_cell(ALWAYS_SUCCESS.clone());
 
     // Generate issuer keypair
@@ -532,13 +553,11 @@ fn test_ct_info_mint_basic() {
     let new_supply = 100u128;
     let output_data = create_ct_info_data(new_supply, &issuer_pubkey, 1_000_000, MINTABLE);
 
-    let outputs = vec![
-        CellOutput::new_builder()
-            .capacity(1000)
-            .lock(lock_script)
-            .type_(Some(type_script))
-            .build(),
-    ];
+    let outputs = vec![CellOutput::new_builder()
+        .capacity(1000)
+        .lock(lock_script)
+        .type_(Some(type_script))
+        .build()];
 
     // Add cell deps
     let cell_deps = vec![CellDep::new_builder().out_point(out_point).build()].pack();
@@ -584,8 +603,7 @@ fn test_ct_info_mint_basic() {
 fn test_ct_info_mint_exceed_cap() {
     // Test: Try to mint beyond supply cap (should fail)
     let mut context = Context::default();
-    let contract_bin: Bytes = Loader::default().load_binary("ct-info-type");
-    let out_point = context.deploy_cell(contract_bin);
+    let out_point = context.deploy_cell_by_name("ct-info-type");
     let always_success_out_point = context.deploy_cell(ALWAYS_SUCCESS.clone());
 
     let mut csprng = OsRng;
@@ -626,13 +644,11 @@ fn test_ct_info_mint_exceed_cap() {
     let new_supply = 1001u128;
     let output_data = create_ct_info_data(new_supply, &issuer_pubkey, supply_cap, MINTABLE);
 
-    let outputs = vec![
-        CellOutput::new_builder()
-            .capacity(1000)
-            .lock(lock_script)
-            .type_(Some(type_script))
-            .build(),
-    ];
+    let outputs = vec![CellOutput::new_builder()
+        .capacity(1000)
+        .lock(lock_script)
+        .type_(Some(type_script))
+        .build()];
 
     // Add cell deps
     let cell_deps = vec![CellDep::new_builder().out_point(out_point).build()].pack();
@@ -676,8 +692,7 @@ fn test_ct_info_mint_exceed_cap() {
 fn test_ct_info_mint_without_signature() {
     // Test: Try to mint without valid signature (should fail)
     let mut context = Context::default();
-    let contract_bin: Bytes = Loader::default().load_binary("ct-info-type");
-    let out_point = context.deploy_cell(contract_bin);
+    let out_point = context.deploy_cell_by_name("ct-info-type");
     let always_success_out_point = context.deploy_cell(ALWAYS_SUCCESS.clone());
 
     let mut csprng = OsRng;
@@ -713,13 +728,11 @@ fn test_ct_info_mint_without_signature() {
 
     let output_data = create_ct_info_data(100, &issuer_pubkey, 1_000_000, MINTABLE);
 
-    let outputs = vec![
-        CellOutput::new_builder()
-            .capacity(1000)
-            .lock(lock_script)
-            .type_(Some(type_script))
-            .build(),
-    ];
+    let outputs = vec![CellOutput::new_builder()
+        .capacity(1000)
+        .lock(lock_script)
+        .type_(Some(type_script))
+        .build()];
 
     // Add cell deps
     let cell_deps = vec![CellDep::new_builder().out_point(out_point).build()].pack();
@@ -743,8 +756,7 @@ fn test_ct_info_mint_without_signature() {
 fn test_ct_info_immutable_issuer_pubkey() {
     // Test: Changing issuer_pubkey should fail with ImmutableFieldChanged
     let mut context = Context::default();
-    let contract_bin: Bytes = Loader::default().load_binary("ct-info-type");
-    let out_point = context.deploy_cell(contract_bin);
+    let out_point = context.deploy_cell_by_name("ct-info-type");
     let always_success_out_point = context.deploy_cell(ALWAYS_SUCCESS.clone());
 
     let mut csprng = OsRng;
@@ -787,13 +799,11 @@ fn test_ct_info_immutable_issuer_pubkey() {
     let new_supply = 100u128;
     let output_data = create_ct_info_data(new_supply, &different_pubkey, 1_000_000, MINTABLE);
 
-    let outputs = vec![
-        CellOutput::new_builder()
-            .capacity(1000)
-            .lock(lock_script)
-            .type_(Some(type_script))
-            .build(),
-    ];
+    let outputs = vec![CellOutput::new_builder()
+        .capacity(1000)
+        .lock(lock_script)
+        .type_(Some(type_script))
+        .build()];
 
     let cell_deps = vec![CellDep::new_builder().out_point(out_point).build()].pack();
 
@@ -836,8 +846,7 @@ fn test_ct_info_immutable_issuer_pubkey() {
 fn test_ct_info_immutable_supply_cap() {
     // Test: Changing supply_cap should fail with ImmutableFieldChanged
     let mut context = Context::default();
-    let contract_bin: Bytes = Loader::default().load_binary("ct-info-type");
-    let out_point = context.deploy_cell(contract_bin);
+    let out_point = context.deploy_cell_by_name("ct-info-type");
     let always_success_out_point = context.deploy_cell(ALWAYS_SUCCESS.clone());
 
     let mut csprng = OsRng;
@@ -876,13 +885,11 @@ fn test_ct_info_immutable_supply_cap() {
     let new_supply = 100u128;
     let output_data = create_ct_info_data(new_supply, &issuer_pubkey, 2_000_000, MINTABLE);
 
-    let outputs = vec![
-        CellOutput::new_builder()
-            .capacity(1000)
-            .lock(lock_script)
-            .type_(Some(type_script))
-            .build(),
-    ];
+    let outputs = vec![CellOutput::new_builder()
+        .capacity(1000)
+        .lock(lock_script)
+        .type_(Some(type_script))
+        .build()];
 
     let cell_deps = vec![CellDep::new_builder().out_point(out_point).build()].pack();
 
@@ -925,8 +932,7 @@ fn test_ct_info_immutable_supply_cap() {
 fn test_ct_info_immutable_flags() {
     // Test: Changing flags should fail with ImmutableFieldChanged
     let mut context = Context::default();
-    let contract_bin: Bytes = Loader::default().load_binary("ct-info-type");
-    let out_point = context.deploy_cell(contract_bin);
+    let out_point = context.deploy_cell_by_name("ct-info-type");
     let always_success_out_point = context.deploy_cell(ALWAYS_SUCCESS.clone());
 
     let mut csprng = OsRng;
@@ -965,13 +971,11 @@ fn test_ct_info_immutable_flags() {
     let new_supply = 100u128;
     let output_data = create_ct_info_data(new_supply, &issuer_pubkey, 1_000_000, 0x03);
 
-    let outputs = vec![
-        CellOutput::new_builder()
-            .capacity(1000)
-            .lock(lock_script)
-            .type_(Some(type_script))
-            .build(),
-    ];
+    let outputs = vec![CellOutput::new_builder()
+        .capacity(1000)
+        .lock(lock_script)
+        .type_(Some(type_script))
+        .build()];
 
     let cell_deps = vec![CellDep::new_builder().out_point(out_point).build()].pack();
 
@@ -1014,8 +1018,7 @@ fn test_ct_info_immutable_flags() {
 fn test_ct_info_decrease_supply() {
     // Test: Decreasing total_supply should fail with InvalidMintAmount
     let mut context = Context::default();
-    let contract_bin: Bytes = Loader::default().load_binary("ct-info-type");
-    let out_point = context.deploy_cell(contract_bin);
+    let out_point = context.deploy_cell_by_name("ct-info-type");
     let always_success_out_point = context.deploy_cell(ALWAYS_SUCCESS.clone());
 
     let mut csprng = OsRng;
@@ -1055,13 +1058,11 @@ fn test_ct_info_decrease_supply() {
     let new_supply = 50u128;
     let output_data = create_ct_info_data(new_supply, &issuer_pubkey, 1_000_000, MINTABLE);
 
-    let outputs = vec![
-        CellOutput::new_builder()
-            .capacity(1000)
-            .lock(lock_script)
-            .type_(Some(type_script))
-            .build(),
-    ];
+    let outputs = vec![CellOutput::new_builder()
+        .capacity(1000)
+        .lock(lock_script)
+        .type_(Some(type_script))
+        .build()];
 
     let cell_deps = vec![CellDep::new_builder().out_point(out_point).build()].pack();
 
@@ -1104,8 +1105,7 @@ fn test_ct_info_decrease_supply() {
 fn test_ct_info_wrong_signature_key() {
     // Test: Using wrong private key for signature should fail with InvalidSignature
     let mut context = Context::default();
-    let contract_bin: Bytes = Loader::default().load_binary("ct-info-type");
-    let out_point = context.deploy_cell(contract_bin);
+    let out_point = context.deploy_cell_by_name("ct-info-type");
     let always_success_out_point = context.deploy_cell(ALWAYS_SUCCESS.clone());
 
     let mut csprng = OsRng;
@@ -1147,13 +1147,11 @@ fn test_ct_info_wrong_signature_key() {
     let new_supply = 100u128;
     let output_data = create_ct_info_data(new_supply, &issuer_pubkey, 1_000_000, MINTABLE);
 
-    let outputs = vec![
-        CellOutput::new_builder()
-            .capacity(1000)
-            .lock(lock_script)
-            .type_(Some(type_script))
-            .build(),
-    ];
+    let outputs = vec![CellOutput::new_builder()
+        .capacity(1000)
+        .lock(lock_script)
+        .type_(Some(type_script))
+        .build()];
 
     let cell_deps = vec![CellDep::new_builder().out_point(out_point).build()].pack();
 
@@ -1198,8 +1196,7 @@ fn test_ct_info_wrong_signature_key() {
 fn test_ct_info_genesis_zero_issuer() {
     // Test: Genesis with all-zero issuer_pubkey should fail
     let mut context = Context::default();
-    let contract_bin: Bytes = Loader::default().load_binary("ct-info-type");
-    let out_point = context.deploy_cell(contract_bin);
+    let out_point = context.deploy_cell_by_name("ct-info-type");
     let always_success_out_point = context.deploy_cell(ALWAYS_SUCCESS.clone());
 
     let zero_pubkey = [0u8; 32];
@@ -1217,13 +1214,11 @@ fn test_ct_info_genesis_zero_issuer() {
 
     let output_data = create_ct_info_data(0, &zero_pubkey, 1_000_000, MINTABLE);
 
-    let outputs = vec![
-        CellOutput::new_builder()
-            .capacity(1000)
-            .lock(lock_script)
-            .type_(Some(type_script))
-            .build(),
-    ];
+    let outputs = vec![CellOutput::new_builder()
+        .capacity(1000)
+        .lock(lock_script)
+        .type_(Some(type_script))
+        .build()];
 
     let tx = TransactionBuilder::default()
         .outputs(outputs)
@@ -1240,8 +1235,7 @@ fn test_ct_info_genesis_zero_issuer() {
 fn test_ct_info_genesis_not_mintable() {
     // Test: Genesis without MINTABLE flag should fail
     let mut context = Context::default();
-    let contract_bin: Bytes = Loader::default().load_binary("ct-info-type");
-    let out_point = context.deploy_cell(contract_bin);
+    let out_point = context.deploy_cell_by_name("ct-info-type");
     let always_success_out_point = context.deploy_cell(ALWAYS_SUCCESS.clone());
 
     let mut csprng = OsRng;
@@ -1262,13 +1256,11 @@ fn test_ct_info_genesis_not_mintable() {
     // Create with flags = 0 (no MINTABLE)
     let output_data = create_ct_info_data(0, &issuer_pubkey, 1_000_000, 0);
 
-    let outputs = vec![
-        CellOutput::new_builder()
-            .capacity(1000)
-            .lock(lock_script)
-            .type_(Some(type_script))
-            .build(),
-    ];
+    let outputs = vec![CellOutput::new_builder()
+        .capacity(1000)
+        .lock(lock_script)
+        .type_(Some(type_script))
+        .build()];
 
     let tx = TransactionBuilder::default()
         .outputs(outputs)
@@ -1285,8 +1277,7 @@ fn test_ct_info_genesis_not_mintable() {
 fn test_ct_info_invalid_mint_commitment() {
     // Test: Mint with wrong mint_commitment should fail with InvalidMintCommitment
     let mut context = Context::default();
-    let contract_bin: Bytes = Loader::default().load_binary("ct-info-type");
-    let out_point = context.deploy_cell(contract_bin);
+    let out_point = context.deploy_cell_by_name("ct-info-type");
     let always_success_out_point = context.deploy_cell(ALWAYS_SUCCESS.clone());
 
     let mut csprng = OsRng;
@@ -1325,13 +1316,11 @@ fn test_ct_info_invalid_mint_commitment() {
     let new_supply = 100u128;
     let output_data = create_ct_info_data(new_supply, &issuer_pubkey, 1_000_000, MINTABLE);
 
-    let outputs = vec![
-        CellOutput::new_builder()
-            .capacity(1000)
-            .lock(lock_script)
-            .type_(Some(type_script))
-            .build(),
-    ];
+    let outputs = vec![CellOutput::new_builder()
+        .capacity(1000)
+        .lock(lock_script)
+        .type_(Some(type_script))
+        .build()];
 
     let cell_deps = vec![CellDep::new_builder().out_point(out_point).build()].pack();
 
@@ -1373,8 +1362,7 @@ fn test_ct_info_invalid_mint_commitment() {
 fn test_ct_token_type() {
     // deploy contract
     let mut context = Context::default();
-    let contract_bin: Bytes = Loader::default().load_binary("ct-token-type");
-    let contract_out_point = context.deploy_cell(contract_bin);
+    let contract_out_point = context.deploy_cell_by_name("ct-token-type");
     let always_success_out_point = context.deploy_cell(ALWAYS_SUCCESS.clone());
 
     // prepare scripts
@@ -1490,8 +1478,7 @@ fn test_ct_token_type() {
 fn test_ct_token_invalid_input_length() {
     // Test: Input cell data is not 64 bytes (should fail with InvalidInput)
     let mut context = Context::default();
-    let contract_bin: Bytes = Loader::default().load_binary("ct-token-type");
-    let contract_out_point = context.deploy_cell(contract_bin);
+    let contract_out_point = context.deploy_cell_by_name("ct-token-type");
     let always_success_out_point = context.deploy_cell(ALWAYS_SUCCESS.clone());
 
     let lock_script = context
@@ -1526,13 +1513,11 @@ fn test_ct_token_invalid_input_length() {
     let mut output_data = c_out.compress().to_bytes().to_vec();
     output_data.extend_from_slice(&[0u8; 32]);
 
-    let outputs = vec![
-        CellOutput::new_builder()
-            .capacity(1000)
-            .lock(lock_script)
-            .type_(Some(type_script))
-            .build(),
-    ];
+    let outputs = vec![CellOutput::new_builder()
+        .capacity(1000)
+        .lock(lock_script)
+        .type_(Some(type_script))
+        .build()];
 
     let bp_gens = BulletproofGens::new(64, 1);
     let mut prover_transcript = Transcript::new(b"ct-token-type");
@@ -1568,8 +1553,7 @@ fn test_ct_token_invalid_input_length() {
 fn test_ct_token_invalid_output_length() {
     // Test: Output cell data is not 64 bytes (should fail with InvalidOutput)
     let mut context = Context::default();
-    let contract_bin: Bytes = Loader::default().load_binary("ct-token-type");
-    let contract_out_point = context.deploy_cell(contract_bin);
+    let contract_out_point = context.deploy_cell_by_name("ct-token-type");
     let always_success_out_point = context.deploy_cell(ALWAYS_SUCCESS.clone());
 
     let lock_script = context
@@ -1604,13 +1588,11 @@ fn test_ct_token_invalid_output_length() {
     // Invalid output - only 32 bytes
     let invalid_output_data = vec![0u8; 32];
 
-    let outputs = vec![
-        CellOutput::new_builder()
-            .capacity(1000)
-            .lock(lock_script)
-            .type_(Some(type_script))
-            .build(),
-    ];
+    let outputs = vec![CellOutput::new_builder()
+        .capacity(1000)
+        .lock(lock_script)
+        .type_(Some(type_script))
+        .build()];
 
     let tx = TransactionBuilder::default()
         .input(input)
@@ -1628,8 +1610,7 @@ fn test_ct_token_invalid_output_length() {
 fn test_ct_token_commitment_mismatch() {
     // Test: Input and output commitment sums don't match (should fail with InputOutputSumMismatch)
     let mut context = Context::default();
-    let contract_bin: Bytes = Loader::default().load_binary("ct-token-type");
-    let contract_out_point = context.deploy_cell(contract_bin);
+    let contract_out_point = context.deploy_cell_by_name("ct-token-type");
     let always_success_out_point = context.deploy_cell(ALWAYS_SUCCESS.clone());
 
     let lock_script = context
@@ -1669,13 +1650,11 @@ fn test_ct_token_commitment_mismatch() {
     let mut output_data = c_out.compress().to_bytes().to_vec();
     output_data.extend_from_slice(&[0u8; 32]);
 
-    let outputs = vec![
-        CellOutput::new_builder()
-            .capacity(1000)
-            .lock(lock_script)
-            .type_(Some(type_script))
-            .build(),
-    ];
+    let outputs = vec![CellOutput::new_builder()
+        .capacity(1000)
+        .lock(lock_script)
+        .type_(Some(type_script))
+        .build()];
 
     let bp_gens = BulletproofGens::new(64, 1);
     let mut prover_transcript = Transcript::new(b"ct-token-type");
@@ -1711,8 +1690,7 @@ fn test_ct_token_commitment_mismatch() {
 fn test_ct_token_invalid_range_proof() {
     // Test: Invalid range proof (proof doesn't match commitments)
     let mut context = Context::default();
-    let contract_bin: Bytes = Loader::default().load_binary("ct-token-type");
-    let contract_out_point = context.deploy_cell(contract_bin);
+    let contract_out_point = context.deploy_cell_by_name("ct-token-type");
     let always_success_out_point = context.deploy_cell(ALWAYS_SUCCESS.clone());
 
     let lock_script = context
@@ -1752,13 +1730,11 @@ fn test_ct_token_invalid_range_proof() {
     let mut output_data = c_out.compress().to_bytes().to_vec();
     output_data.extend_from_slice(&[0u8; 32]);
 
-    let outputs = vec![
-        CellOutput::new_builder()
-            .capacity(1000)
-            .lock(lock_script)
-            .type_(Some(type_script))
-            .build(),
-    ];
+    let outputs = vec![CellOutput::new_builder()
+        .capacity(1000)
+        .lock(lock_script)
+        .type_(Some(type_script))
+        .build()];
 
     // Create a proof for DIFFERENT values (wrong proof)
     let bp_gens = BulletproofGens::new(64, 1);
@@ -1796,8 +1772,7 @@ fn test_ct_token_invalid_range_proof() {
 fn test_ct_token_missing_range_proof() {
     // Test: Missing range proof in witness (should fail with InvalidRangeProofWitnessFormat)
     let mut context = Context::default();
-    let contract_bin: Bytes = Loader::default().load_binary("ct-token-type");
-    let contract_out_point = context.deploy_cell(contract_bin);
+    let contract_out_point = context.deploy_cell_by_name("ct-token-type");
     let always_success_out_point = context.deploy_cell(ALWAYS_SUCCESS.clone());
 
     let lock_script = context
@@ -1829,13 +1804,11 @@ fn test_ct_token_missing_range_proof() {
         .previous_output(input_out_point)
         .build();
 
-    let outputs = vec![
-        CellOutput::new_builder()
-            .capacity(1000)
-            .lock(lock_script)
-            .type_(Some(type_script))
-            .build(),
-    ];
+    let outputs = vec![CellOutput::new_builder()
+        .capacity(1000)
+        .lock(lock_script)
+        .type_(Some(type_script))
+        .build()];
 
     // No range proof in witness
     let witness_args = WitnessArgs::new_builder().build();
@@ -1857,13 +1830,10 @@ fn test_ct_token_missing_range_proof() {
 fn test_ct_token_mint_with_commitment() {
     // Test: Mint transaction with mint_commitment in witness and ct-info-type present
     let mut context = Context::default();
-    let loader = Loader::default();
 
     // Deploy contracts
-    let ct_token_bin: Bytes = loader.load_binary("ct-token-type");
-    let ct_info_bin: Bytes = loader.load_binary("ct-info-type");
-    let ct_token_out_point = context.deploy_cell(ct_token_bin);
-    let ct_info_out_point = context.deploy_cell(ct_info_bin);
+    let ct_token_out_point = context.deploy_cell_by_name("ct-token-type");
+    let ct_info_out_point = context.deploy_cell_by_name("ct-info-type");
     let always_success_out_point = context.deploy_cell(ALWAYS_SUCCESS.clone());
 
     let lock_script = context
@@ -2043,13 +2013,10 @@ fn test_ct_token_mint_without_ct_info_type() {
     // Test: Mint transaction with mint_commitment but WITHOUT ct-info-type should fail
     // This tests the security fix that prevents unauthorized minting
     let mut context = Context::default();
-    let loader = Loader::default();
 
     // Deploy only ct-token-type (not ct-info-type in the transaction inputs)
-    let ct_token_bin: Bytes = loader.load_binary("ct-token-type");
-    let ct_info_bin: Bytes = loader.load_binary("ct-info-type");
-    let ct_token_out_point = context.deploy_cell(ct_token_bin);
-    let ct_info_out_point = context.deploy_cell(ct_info_bin);
+    let ct_token_out_point = context.deploy_cell_by_name("ct-token-type");
+    let ct_info_out_point = context.deploy_cell_by_name("ct-info-type");
     let always_success_out_point = context.deploy_cell(ALWAYS_SUCCESS.clone());
 
     let lock_script = context
@@ -2101,13 +2068,11 @@ fn test_ct_token_mint_without_ct_info_type() {
     let mut output_data = c_out.compress().to_bytes().to_vec();
     output_data.extend_from_slice(&[0u8; 32]);
 
-    let outputs = vec![
-        CellOutput::new_builder()
-            .capacity(1000)
-            .lock(lock_script)
-            .type_(Some(type_script))
-            .build(),
-    ];
+    let outputs = vec![CellOutput::new_builder()
+        .capacity(1000)
+        .lock(lock_script)
+        .type_(Some(type_script))
+        .build()];
 
     // Create range proof
     let bp_gens = BulletproofGens::new(64, 1);
@@ -2155,10 +2120,8 @@ fn test_ct_token_mint_without_ct_info_type() {
 fn test_ct_token_mint_invalid_script_args() {
     // Test: Mint with script args too short (less than 32 bytes) should fail
     let mut context = Context::default();
-    let loader = Loader::default();
 
-    let ct_token_bin: Bytes = loader.load_binary("ct-token-type");
-    let ct_token_out_point = context.deploy_cell(ct_token_bin);
+    let ct_token_out_point = context.deploy_cell_by_name("ct-token-type");
     let always_success_out_point = context.deploy_cell(ALWAYS_SUCCESS.clone());
 
     let lock_script = context
@@ -2202,13 +2165,11 @@ fn test_ct_token_mint_invalid_script_args() {
     let mut output_data = c_out.compress().to_bytes().to_vec();
     output_data.extend_from_slice(&[0u8; 32]);
 
-    let outputs = vec![
-        CellOutput::new_builder()
-            .capacity(1000)
-            .lock(lock_script)
-            .type_(Some(type_script))
-            .build(),
-    ];
+    let outputs = vec![CellOutput::new_builder()
+        .capacity(1000)
+        .lock(lock_script)
+        .type_(Some(type_script))
+        .build()];
 
     let bp_gens = BulletproofGens::new(64, 1);
     let mut prover_transcript = Transcript::new(b"ct-token-type");
@@ -2252,8 +2213,7 @@ fn test_ct_token_mint_invalid_script_args() {
 fn test_ct_token_invalid_input_ristretto_point() {
     // Test: Input cell data has 64 bytes but first 32 bytes are not a valid Ristretto point
     let mut context = Context::default();
-    let contract_bin: Bytes = Loader::default().load_binary("ct-token-type");
-    let contract_out_point = context.deploy_cell(contract_bin);
+    let contract_out_point = context.deploy_cell_by_name("ct-token-type");
     let always_success_out_point = context.deploy_cell(ALWAYS_SUCCESS.clone());
 
     let lock_script = context
@@ -2290,13 +2250,11 @@ fn test_ct_token_invalid_input_ristretto_point() {
     let mut output_data = c_out.compress().to_bytes().to_vec();
     output_data.extend_from_slice(&[0u8; 32]);
 
-    let outputs = vec![
-        CellOutput::new_builder()
-            .capacity(1000)
-            .lock(lock_script)
-            .type_(Some(type_script))
-            .build(),
-    ];
+    let outputs = vec![CellOutput::new_builder()
+        .capacity(1000)
+        .lock(lock_script)
+        .type_(Some(type_script))
+        .build()];
 
     let bp_gens = BulletproofGens::new(64, 1);
     let mut prover_transcript = Transcript::new(b"ct-token-type");
@@ -2332,8 +2290,7 @@ fn test_ct_token_invalid_input_ristretto_point() {
 fn test_ct_token_invalid_output_ristretto_point() {
     // Test: Output cell data has 64 bytes but first 32 bytes are not a valid Ristretto point
     let mut context = Context::default();
-    let contract_bin: Bytes = Loader::default().load_binary("ct-token-type");
-    let contract_out_point = context.deploy_cell(contract_bin);
+    let contract_out_point = context.deploy_cell_by_name("ct-token-type");
     let always_success_out_point = context.deploy_cell(ALWAYS_SUCCESS.clone());
 
     let lock_script = context
@@ -2369,13 +2326,11 @@ fn test_ct_token_invalid_output_ristretto_point() {
     let mut invalid_output_data = vec![0xFF; 32]; // Invalid point bytes
     invalid_output_data.extend_from_slice(&[0u8; 32]); // Padding
 
-    let outputs = vec![
-        CellOutput::new_builder()
-            .capacity(1000)
-            .lock(lock_script)
-            .type_(Some(type_script))
-            .build(),
-    ];
+    let outputs = vec![CellOutput::new_builder()
+        .capacity(1000)
+        .lock(lock_script)
+        .type_(Some(type_script))
+        .build()];
 
     // We still need a witness, though it won't be verified due to earlier failure
     let witness_args = WitnessArgs::new_builder().build();
@@ -2401,12 +2356,9 @@ fn test_ct_token_invalid_output_ristretto_point() {
 fn test_ct_token_invalid_mint_commitment_length() {
     // Test: Mint commitment in witness is not 32 bytes
     let mut context = Context::default();
-    let loader = Loader::default();
 
-    let ct_token_bin: Bytes = loader.load_binary("ct-token-type");
-    let ct_info_bin: Bytes = loader.load_binary("ct-info-type");
-    let ct_token_out_point = context.deploy_cell(ct_token_bin);
-    let ct_info_out_point = context.deploy_cell(ct_info_bin);
+    let ct_token_out_point = context.deploy_cell_by_name("ct-token-type");
+    let ct_info_out_point = context.deploy_cell_by_name("ct-info-type");
     let always_success_out_point = context.deploy_cell(ALWAYS_SUCCESS.clone());
 
     let lock_script = context
@@ -2566,12 +2518,9 @@ fn test_ct_token_invalid_mint_commitment_length() {
 fn test_ct_token_invalid_mint_commitment_point() {
     // Test: Mint commitment is 32 bytes but not a valid Ristretto point
     let mut context = Context::default();
-    let loader = Loader::default();
 
-    let ct_token_bin: Bytes = loader.load_binary("ct-token-type");
-    let ct_info_bin: Bytes = loader.load_binary("ct-info-type");
-    let ct_token_out_point = context.deploy_cell(ct_token_bin);
-    let ct_info_out_point = context.deploy_cell(ct_info_bin);
+    let ct_token_out_point = context.deploy_cell_by_name("ct-token-type");
+    let ct_info_out_point = context.deploy_cell_by_name("ct-info-type");
     let always_success_out_point = context.deploy_cell(ALWAYS_SUCCESS.clone());
 
     let lock_script = context
@@ -2725,12 +2674,9 @@ fn test_ct_token_invalid_mint_commitment_point() {
 fn test_ct_token_mint_commitment_sum_mismatch() {
     // Test: Mint commitment doesn't match the difference between output and input sums
     let mut context = Context::default();
-    let loader = Loader::default();
 
-    let ct_token_bin: Bytes = loader.load_binary("ct-token-type");
-    let ct_info_bin: Bytes = loader.load_binary("ct-info-type");
-    let ct_token_out_point = context.deploy_cell(ct_token_bin);
-    let ct_info_out_point = context.deploy_cell(ct_info_bin);
+    let ct_token_out_point = context.deploy_cell_by_name("ct-token-type");
+    let ct_info_out_point = context.deploy_cell_by_name("ct-info-type");
     let always_success_out_point = context.deploy_cell(ALWAYS_SUCCESS.clone());
 
     let lock_script = context
@@ -2890,8 +2836,7 @@ fn test_ct_token_mint_commitment_sum_mismatch() {
 fn test_ct_info_invalid_cell_count_2_inputs() {
     // Test: 2 inputs with ct-info-type should fail with InvalidCellCount
     let mut context = Context::default();
-    let contract_bin: Bytes = Loader::default().load_binary("ct-info-type");
-    let out_point = context.deploy_cell(contract_bin);
+    let out_point = context.deploy_cell_by_name("ct-info-type");
     let always_success_out_point = context.deploy_cell(ALWAYS_SUCCESS.clone());
 
     let mut csprng = OsRng;
@@ -2938,13 +2883,11 @@ fn test_ct_info_invalid_cell_count_2_inputs() {
 
     let output_data = create_ct_info_data(200, &issuer_pubkey, 1_000_000, MINTABLE);
 
-    let outputs = vec![
-        CellOutput::new_builder()
-            .capacity(1000)
-            .lock(lock_script)
-            .type_(Some(type_script))
-            .build(),
-    ];
+    let outputs = vec![CellOutput::new_builder()
+        .capacity(1000)
+        .lock(lock_script)
+        .type_(Some(type_script))
+        .build()];
 
     let cell_deps = vec![CellDep::new_builder().out_point(out_point).build()].pack();
 
@@ -2968,8 +2911,7 @@ fn test_ct_info_invalid_cell_count_0_outputs() {
     // Test: 1 input with 0 outputs should fail with InvalidCellCount
     // (This represents destroying the token info which is not allowed in mint flow)
     let mut context = Context::default();
-    let contract_bin: Bytes = Loader::default().load_binary("ct-info-type");
-    let out_point = context.deploy_cell(contract_bin);
+    let out_point = context.deploy_cell_by_name("ct-info-type");
     let always_success_out_point = context.deploy_cell(ALWAYS_SUCCESS.clone());
 
     let mut csprng = OsRng;
@@ -3029,8 +2971,7 @@ fn test_ct_info_invalid_cell_count_0_outputs() {
 fn test_ct_info_genesis_multiple_outputs() {
     // Test: Genesis with 2 outputs should fail with InvalidCellCount
     let mut context = Context::default();
-    let contract_bin: Bytes = Loader::default().load_binary("ct-info-type");
-    let out_point = context.deploy_cell(contract_bin);
+    let out_point = context.deploy_cell_by_name("ct-info-type");
     let always_success_out_point = context.deploy_cell(ALWAYS_SUCCESS.clone());
 
     let mut csprng = OsRng;
@@ -3083,8 +3024,7 @@ fn test_ct_info_genesis_multiple_outputs() {
 fn test_ct_token_malformed_range_proof() {
     // Test: Random bytes that fail RangeProof::from_bytes
     let mut context = Context::default();
-    let contract_bin: Bytes = Loader::default().load_binary("ct-token-type");
-    let contract_out_point = context.deploy_cell(contract_bin);
+    let contract_out_point = context.deploy_cell_by_name("ct-token-type");
     let always_success_out_point = context.deploy_cell(ALWAYS_SUCCESS.clone());
 
     let lock_script = context
@@ -3116,13 +3056,11 @@ fn test_ct_token_malformed_range_proof() {
         .previous_output(input_out_point)
         .build();
 
-    let outputs = vec![
-        CellOutput::new_builder()
-            .capacity(1000)
-            .lock(lock_script)
-            .type_(Some(type_script))
-            .build(),
-    ];
+    let outputs = vec![CellOutput::new_builder()
+        .capacity(1000)
+        .lock(lock_script)
+        .type_(Some(type_script))
+        .build()];
 
     // Random bytes that are NOT a valid RangeProof
     let malformed_proof = vec![0xDE, 0xAD, 0xBE, 0xEF, 0x12, 0x34, 0x56, 0x78];
@@ -3151,8 +3089,7 @@ fn test_ct_token_malformed_range_proof() {
 fn test_ct_info_unlimited_supply_cap() {
     // Test: supply_cap = 0 should allow unlimited minting (positive test)
     let mut context = Context::default();
-    let contract_bin: Bytes = Loader::default().load_binary("ct-info-type");
-    let out_point = context.deploy_cell(contract_bin);
+    let out_point = context.deploy_cell_by_name("ct-info-type");
     let always_success_out_point = context.deploy_cell(ALWAYS_SUCCESS.clone());
 
     let mut csprng = OsRng;
@@ -3192,13 +3129,11 @@ fn test_ct_info_unlimited_supply_cap() {
     let new_supply = 1_000_000_000_000u128; // 1 trillion tokens
     let output_data = create_ct_info_data(new_supply, &issuer_pubkey, 0, MINTABLE);
 
-    let outputs = vec![
-        CellOutput::new_builder()
-            .capacity(1000)
-            .lock(lock_script)
-            .type_(Some(type_script))
-            .build(),
-    ];
+    let outputs = vec![CellOutput::new_builder()
+        .capacity(1000)
+        .lock(lock_script)
+        .type_(Some(type_script))
+        .build()];
 
     let cell_deps = vec![CellDep::new_builder().out_point(out_point).build()].pack();
 
@@ -3244,8 +3179,7 @@ fn test_ct_info_unlimited_supply_cap() {
 fn test_ct_info_invalid_signature_length() {
     // Test: Signature length is not 64 bytes should fail with InvalidSignature
     let mut context = Context::default();
-    let contract_bin: Bytes = Loader::default().load_binary("ct-info-type");
-    let out_point = context.deploy_cell(contract_bin);
+    let out_point = context.deploy_cell_by_name("ct-info-type");
     let always_success_out_point = context.deploy_cell(ALWAYS_SUCCESS.clone());
 
     let mut csprng = OsRng;
@@ -3280,13 +3214,11 @@ fn test_ct_info_invalid_signature_length() {
 
     let output_data = create_ct_info_data(100, &issuer_pubkey, 1_000_000, MINTABLE);
 
-    let outputs = vec![
-        CellOutput::new_builder()
-            .capacity(1000)
-            .lock(lock_script)
-            .type_(Some(type_script))
-            .build(),
-    ];
+    let outputs = vec![CellOutput::new_builder()
+        .capacity(1000)
+        .lock(lock_script)
+        .type_(Some(type_script))
+        .build()];
 
     let cell_deps = vec![CellDep::new_builder().out_point(out_point).build()].pack();
 
@@ -3322,8 +3254,7 @@ fn test_ct_info_invalid_signature_length() {
 fn test_ct_info_zero_mint_amount() {
     // Test: Trying to mint 0 tokens (new_supply == old_supply) should fail with InvalidMintAmount
     let mut context = Context::default();
-    let contract_bin: Bytes = Loader::default().load_binary("ct-info-type");
-    let out_point = context.deploy_cell(contract_bin);
+    let out_point = context.deploy_cell_by_name("ct-info-type");
     let always_success_out_point = context.deploy_cell(ALWAYS_SUCCESS.clone());
 
     let mut csprng = OsRng;
@@ -3360,13 +3291,11 @@ fn test_ct_info_zero_mint_amount() {
     // Same supply - trying to mint 0 tokens
     let output_data = create_ct_info_data(supply, &issuer_pubkey, 1_000_000, MINTABLE);
 
-    let outputs = vec![
-        CellOutput::new_builder()
-            .capacity(1000)
-            .lock(lock_script)
-            .type_(Some(type_script))
-            .build(),
-    ];
+    let outputs = vec![CellOutput::new_builder()
+        .capacity(1000)
+        .lock(lock_script)
+        .type_(Some(type_script))
+        .build()];
 
     let cell_deps = vec![CellDep::new_builder().out_point(out_point).build()].pack();
 
@@ -3407,8 +3336,7 @@ fn test_ct_info_zero_mint_amount() {
 fn test_ct_info_missing_mint_commitment() {
     // Test: Mint without output_type in witness (missing mint commitment)
     let mut context = Context::default();
-    let contract_bin: Bytes = Loader::default().load_binary("ct-info-type");
-    let out_point = context.deploy_cell(contract_bin);
+    let out_point = context.deploy_cell_by_name("ct-info-type");
     let always_success_out_point = context.deploy_cell(ALWAYS_SUCCESS.clone());
 
     let mut csprng = OsRng;
@@ -3445,13 +3373,11 @@ fn test_ct_info_missing_mint_commitment() {
 
     let output_data = create_ct_info_data(new_supply, &issuer_pubkey, 1_000_000, MINTABLE);
 
-    let outputs = vec![
-        CellOutput::new_builder()
-            .capacity(1000)
-            .lock(lock_script)
-            .type_(Some(type_script))
-            .build(),
-    ];
+    let outputs = vec![CellOutput::new_builder()
+        .capacity(1000)
+        .lock(lock_script)
+        .type_(Some(type_script))
+        .build()];
 
     let cell_deps = vec![CellDep::new_builder().out_point(out_point).build()].pack();
 
@@ -3491,8 +3417,7 @@ fn test_ct_info_missing_mint_commitment() {
 fn test_ct_info_data_wrong_length() {
     // Test: Cell data is not exactly 89 bytes should fail with InvalidDataLength
     let mut context = Context::default();
-    let contract_bin: Bytes = Loader::default().load_binary("ct-info-type");
-    let out_point = context.deploy_cell(contract_bin);
+    let out_point = context.deploy_cell_by_name("ct-info-type");
     let always_success_out_point = context.deploy_cell(ALWAYS_SUCCESS.clone());
 
     let token_id = [57u8; 32];
@@ -3509,13 +3434,11 @@ fn test_ct_info_data_wrong_length() {
     // Wrong data length: 88 bytes instead of 89
     let invalid_data: Bytes = vec![0u8; 88].into();
 
-    let outputs = vec![
-        CellOutput::new_builder()
-            .capacity(1000)
-            .lock(lock_script)
-            .type_(Some(type_script))
-            .build(),
-    ];
+    let outputs = vec![CellOutput::new_builder()
+        .capacity(1000)
+        .lock(lock_script)
+        .type_(Some(type_script))
+        .build()];
 
     let tx = TransactionBuilder::default()
         .outputs(outputs)

@@ -8,6 +8,10 @@ members = [
   "contracts/ct-token-type",
   "contracts/ct-info-type",
   "contracts/stealth-lock",
+  "native-simulators/ct-token-type-sim",
+  "native-simulators/ct-info-type-sim",
+  "native-simulators/stealth-lock-sim",
+  "native-simulators/ckb-auth-sim",
   "tests",
 ]
 

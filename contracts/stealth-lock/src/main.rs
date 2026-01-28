@@ -5,12 +5,16 @@
 extern crate alloc;
 
 use alloc::ffi::CString;
+#[cfg(not(feature = "native-simulator"))]
+use ckb_std::high_level::exec_cell;
 use ckb_std::{
     ckb_constants::Source,
     ckb_types::core::ScriptHashType,
     error::SysError,
-    high_level::{exec_cell, load_script, load_tx_hash, load_witness_args},
+    high_level::{load_script, load_tx_hash, load_witness_args},
 };
+#[cfg(feature = "native-simulator")]
+use ckb_std::{high_level::spawn_cell, syscalls::wait};
 use hex::encode;
 
 #[cfg(not(any(feature = "library", test)))]
@@ -100,6 +104,26 @@ fn auth() -> Result<(), Error> {
         pubkey_hash_str.as_c_str(),
     ];
 
-    exec_cell(&CKB_AUTH_CODE_HASH, ScriptHashType::Data2, &args).map_err(|_| Error::AuthError)?;
-    Ok(())
+    // In native-simulator mode, use spawn_cell + wait instead of exec_cell.
+    // This is because ckb_exec_cell in ckb-x64-simulator clobbers the parent's
+    // thread-local context, preventing control from returning properly.
+    // spawn_cell + wait works correctly with the simulator.
+    #[cfg(feature = "native-simulator")]
+    {
+        let pid = spawn_cell(&CKB_AUTH_CODE_HASH, ScriptHashType::Data2, &args, &[])
+            .map_err(|_| Error::AuthError)?;
+        let exit_code = wait(pid).map_err(|_| Error::AuthError)?;
+        if exit_code == 0 {
+            Ok(())
+        } else {
+            Err(Error::AuthError)
+        }
+    }
+    // In the real RISC-V environment, exec_cell never returns on success.
+    #[cfg(not(feature = "native-simulator"))]
+    {
+        exec_cell(&CKB_AUTH_CODE_HASH, ScriptHashType::Data2, &args)
+            .map_err(|_| Error::AuthError)?;
+        Ok(())
+    }
 }
