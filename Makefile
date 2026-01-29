@@ -52,11 +52,23 @@ build:
 			cargo build -p $$(basename $$crate) $(MODE_ARGS) $(CARGO_ARGS); \
 		done; \
 		for sim in $(wildcard native-simulators/*); do \
-			cargo build -p $$(basename $$sim) $(CARGO_ARGS); \
+			cargo build -p $$(basename $$sim) $(MODE_ARGS) $(CARGO_ARGS); \
+		done; \
+		for sim in $(wildcard native-simulators/*); do \
+			simname=$$(basename $$sim); \
+			libname=$$(echo $$simname | sed 's/-/_/g'); \
+			if [ -f "target/$(MODE)/lib$${libname}.so" ]; then \
+				cp "target/$(MODE)/lib$${libname}.so" $(BUILD_DIR)/; \
+			fi; \
 		done; \
 	else \
 		$(MAKE) -e -C contracts/$(CONTRACT) build; \
-		cargo build -p $(CONTRACT)-sim; \
+		cargo build -p $(CONTRACT)-sim $(MODE_ARGS); \
+		simname=$(CONTRACT)-sim; \
+		libname=$$(echo $$simname | sed 's/-/_/g'); \
+		if [ -f "target/$(MODE)/lib$${libname}.so" ]; then \
+			cp "target/$(MODE)/lib$${libname}.so" $(BUILD_DIR)/; \
+		fi; \
 	fi;
 
 # Run a single make task for a specific contract. For example:
@@ -150,4 +162,122 @@ CHECKSUM_FILE := build/checksums-$(MODE).txt
 checksum: build
 	shasum -a 256 build/$(MODE)/* > $(CHECKSUM_FILE)
 
-.PHONY: build test check clippy fmt cargo clean prepare checksum
+# ============================================================================
+# Coverage targets (using native-simulator mode)
+# ============================================================================
+# 
+# Coverage works by:
+# 1. Building simulator .so files with LLVM coverage instrumentation
+# 2. Running tests with native-simulator feature (executes contracts natively)
+# 3. Simulator .so files call __llvm_profile_write_file() on unload to flush coverage
+# 4. Using llvm-cov to generate reports from the profraw files
+#
+# Requirements: rustup component llvm-tools-preview
+
+LLVM_TOOLS_DIR := $(shell rustc --print sysroot)/lib/rustlib/$(shell rustc -vV | grep host | cut -d' ' -f2)/bin
+LLVM_PROFDATA := $(LLVM_TOOLS_DIR)/llvm-profdata
+LLVM_COV := $(LLVM_TOOLS_DIR)/llvm-cov
+COVERAGE_DIR := target/coverage
+PROFRAW_PATTERN := $(COVERAGE_DIR)/profraw
+
+# Build simulators with coverage instrumentation
+# Uses RUSTFLAGS directly instead of cargo-llvm-cov wrapper for proper instrumentation
+build-sim-cov:
+	@echo "Building native simulators with coverage instrumentation..."
+	@# First build the RISC-V contract binaries (these don't need coverage)
+	$(MAKE) build MODE=debug CLEAN_BUILD_DIR_FIRST=true
+	@# Clean simulator artifacts to force rebuild with coverage
+	rm -f target/debug/deps/libct_info_type*.rlib target/debug/deps/libct_token_type*.rlib target/debug/deps/libstealth_lock*.rlib
+	rm -f target/debug/libct_info_type_sim.so target/debug/libct_token_type_sim.so target/debug/libstealth_lock_sim.so
+	@# Rebuild simulators with LLVM coverage instrumentation
+	@echo "Rebuilding simulators with LLVM coverage instrumentation..."
+	RUSTFLAGS="-C instrument-coverage --cfg=coverage" \
+		cargo build -p ct-info-type-sim -p ct-token-type-sim -p stealth-lock-sim
+	@# Copy the instrumented simulators to build/debug/
+	@echo "Copying instrumented simulators to build/debug/..."
+	cp target/debug/libct_info_type_sim.so build/debug/
+	cp target/debug/libct_token_type_sim.so build/debug/
+	cp target/debug/libstealth_lock_sim.so build/debug/
+	@echo "Done! Instrumented simulators are in build/debug/"
+
+# Build simulators for coverage (debug mode for better coverage data)
+build-sim:
+	@echo "Building native simulators for coverage..."
+	$(MAKE) build MODE=debug CLEAN_BUILD_DIR_FIRST=true
+
+# Internal target: run tests and collect coverage data
+coverage-run-tests:
+	@echo "Running tests with coverage (native-simulator mode)..."
+	@mkdir -p $(COVERAGE_DIR)
+	@rm -f $(PROFRAW_PATTERN)-*.profraw
+	@# Run ct-info tests
+	LLVM_PROFILE_FILE="$(CURDIR)/$(PROFRAW_PATTERN)-%p-%8m.profraw" \
+		MODE=debug cargo test --features native-simulator --package tests \
+		-- --test-threads=1 test_ct_info 2>&1 || true
+	@# Run ct-token tests
+	LLVM_PROFILE_FILE="$(CURDIR)/$(PROFRAW_PATTERN)-%p-%8m.profraw" \
+		MODE=debug cargo test --features native-simulator --package tests \
+		-- --test-threads=1 test_ct_token 2>&1 || true
+	@# Run stealth-lock tests
+	LLVM_PROFILE_FILE="$(CURDIR)/$(PROFRAW_PATTERN)-%p-%8m.profraw" \
+		MODE=debug cargo test --features native-simulator --package tests \
+		-- --test-threads=1 test_stealth 2>&1 || true
+	@echo "Merging coverage data..."
+	$(LLVM_PROFDATA) merge -sparse $(PROFRAW_PATTERN)-*.profraw -o $(COVERAGE_DIR)/coverage.profdata
+	@# Clean up profraw files after merging
+	@rm -f $(PROFRAW_PATTERN)-*.profraw
+	@# Clean up stray default_*.profraw files created by child processes
+	@rm -f $(CURDIR)/default_*.profraw
+
+# Run tests with coverage and generate text report
+coverage: build-sim-cov coverage-run-tests
+	@echo ""
+	@echo "=== Coverage Report ==="
+	@$(LLVM_COV) report \
+		-object build/debug/libct_info_type_sim.so \
+		-object build/debug/libct_token_type_sim.so \
+		-object build/debug/libstealth_lock_sim.so \
+		-instr-profile=$(COVERAGE_DIR)/coverage.profdata \
+		--ignore-filename-regex='\.cargo|rustc|rustlib'
+
+# Generate HTML coverage report
+coverage-html: build-sim-cov coverage-run-tests
+	@echo "Generating HTML coverage report..."
+	@mkdir -p $(COVERAGE_DIR)/html
+	@$(LLVM_COV) show \
+		-object build/debug/libct_info_type_sim.so \
+		-object build/debug/libct_token_type_sim.so \
+		-object build/debug/libstealth_lock_sim.so \
+		-instr-profile=$(COVERAGE_DIR)/coverage.profdata \
+		--ignore-filename-regex='\.cargo|rustc|rustlib' \
+		--format=html --output-dir=$(COVERAGE_DIR)/html \
+		--show-line-counts-or-regions --show-instantiations
+	@echo "Coverage report generated at: $(COVERAGE_DIR)/html/index.html"
+
+# Generate LCOV format for CI integration
+coverage-lcov: build-sim-cov coverage-run-tests
+	@echo "Generating LCOV coverage report..."
+	@$(LLVM_COV) export \
+		-object build/debug/libct_info_type_sim.so \
+		-object build/debug/libct_token_type_sim.so \
+		-object build/debug/libstealth_lock_sim.so \
+		-instr-profile=$(COVERAGE_DIR)/coverage.profdata \
+		--ignore-filename-regex='\.cargo|rustc|rustlib' \
+		--format=lcov > $(COVERAGE_DIR)/lcov.info
+	@echo "LCOV report generated at: $(COVERAGE_DIR)/lcov.info"
+
+# Install llvm-tools if not present
+coverage-install:
+	@if ! rustup component list --installed | grep -q llvm-tools; then \
+		echo "Installing llvm-tools-preview..."; \
+		rustup component add llvm-tools-preview; \
+	else \
+		echo "llvm-tools-preview is already installed"; \
+	fi
+
+# Clean coverage artifacts
+coverage-clean:
+	rm -rf $(COVERAGE_DIR)
+
+.PHONY: build test check clippy fmt cargo clean prepare checksum \
+        build-sim build-sim-cov coverage-run-tests coverage coverage-html coverage-lcov coverage-install coverage-clean
