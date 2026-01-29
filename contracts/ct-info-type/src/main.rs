@@ -4,16 +4,15 @@
 #[cfg(any(feature = "library", test))]
 extern crate alloc;
 
-use alloc::vec::Vec;
 use ckb_std::{
     ckb_constants::Source,
     error::SysError,
-    high_level::{QueryIter, load_cell_data, load_tx_hash, load_witness_args},
+    high_level::{load_cell_data, load_witness_args, QueryIter},
+    type_id::check_type_id,
 };
 use curve25519_dalek::{
     constants::RISTRETTO_BASEPOINT_POINT, ristretto::CompressedRistretto, scalar::Scalar,
 };
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 
 #[cfg(not(any(feature = "library", test)))]
 ckb_std::entry!(program_entry);
@@ -35,9 +34,10 @@ pub enum Error {
     SupplyCapExceeded,
     InvalidMintAmount,
     SupplyOverflow,
-    InvalidSignature,
     InvalidMintCommitment,
     WitnessFormatError,
+    InvalidIssuerPubkey,
+    InvalidTypeId,
 }
 
 impl From<SysError> for Error {
@@ -144,13 +144,19 @@ fn validate_genesis(output_count: usize) -> Result<(), Error> {
         return Err(Error::InvalidCellCount);
     }
 
+    // Verify Type ID uniqueness using ckb-std's built-in check
+    // Type ID = blake2b(inputs[0] || output_index)
+    // This ensures each ct-info cell has a globally unique identifier
+    // The Type ID is stored in script args[0..32]
+    check_type_id(0, 32).map_err(|_| Error::InvalidTypeId)?;
+
     // Load output data
     let output_data = load_cell_data(0, Source::GroupOutput)?;
     let output_info = CtInfoData::from_bytes(&output_data)?;
 
     // Check issuer is set (not all zeros)
     if output_info.issuer_pubkey == [0u8; 32] {
-        return Err(Error::InvalidSignature);
+        return Err(Error::InvalidIssuerPubkey);
     }
 
     // Check mintable flag is set
@@ -196,46 +202,8 @@ fn validate_mint() -> Result<(), Error> {
         return Err(Error::SupplyCapExceeded);
     }
 
-    // Verify issuer signature
-    verify_issuer_signature(&input_info, &output_info)?;
-
     // Compute and store mint commitment
     compute_mint_commitment(minted_amount)?;
-
-    Ok(())
-}
-
-fn verify_issuer_signature(input_info: &CtInfoData, output_info: &CtInfoData) -> Result<(), Error> {
-    // Load witness
-    let witness_args = load_witness_args(0, Source::GroupInput)?;
-    let signature_bytes = witness_args
-        .input_type()
-        .to_opt()
-        .ok_or(Error::WitnessFormatError)?
-        .raw_data();
-
-    if signature_bytes.len() != 64 {
-        return Err(Error::InvalidSignature);
-    }
-
-    // Parse signature
-    let signature = Signature::from_slice(&signature_bytes).or(Err(Error::InvalidSignature))?;
-
-    // Parse public key
-    let verifying_key =
-        VerifyingKey::from_bytes(&input_info.issuer_pubkey).or(Err(Error::InvalidSignature))?;
-
-    // Construct message: tx_hash || old_supply || new_supply
-    let tx_hash = load_tx_hash()?;
-    let mut message = Vec::new();
-    message.extend_from_slice(&tx_hash);
-    message.extend_from_slice(&input_info.total_supply.to_le_bytes());
-    message.extend_from_slice(&output_info.total_supply.to_le_bytes());
-
-    // Verify signature
-    verifying_key
-        .verify(&message, &signature)
-        .or(Err(Error::InvalidSignature))?;
 
     Ok(())
 }

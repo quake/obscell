@@ -450,6 +450,16 @@ fn create_ct_info_data(
     data.into()
 }
 
+/// Calculate Type ID for a genesis transaction.
+/// Type ID = blake2b(first_input || output_index)
+/// where first_input is the full CellInput structure (not just out_point)
+fn calculate_type_id(first_input: &CellInput, output_index: u64) -> [u8; 32] {
+    let mut data = Vec::new();
+    data.extend_from_slice(first_input.as_slice());
+    data.extend_from_slice(&output_index.to_le_bytes());
+    blake2b_256(&data)
+}
+
 // Helper function to compute mint commitment for a given amount
 // mint_commitment = amount * G (with zero blinding factor)
 fn compute_mint_commitment(amount: u128) -> Bytes {
@@ -476,16 +486,30 @@ fn test_ct_info_genesis() {
     let verifying_key = signing_key.verifying_key();
     let issuer_pubkey: [u8; 32] = verifying_key.to_bytes();
 
-    // Create token with supply_cap = 1,000,000
-    let token_id = [1u8; 32];
-    let mut type_args = Vec::new();
-    type_args.extend_from_slice(&token_id);
-    type_args.push(0); // version
-
-    let type_script = context.build_script(&out_point, type_args.into()).unwrap();
-
     let lock_script = context
         .build_script(&always_success_out_point, Bytes::new())
+        .unwrap();
+
+    // Create a dummy input cell for Type ID calculation
+    // Type ID requires at least one input in the transaction
+    let dummy_input_out_point = context.create_cell(
+        CellOutput::new_builder()
+            .capacity(1000)
+            .lock(lock_script.clone())
+            .build(),
+        Bytes::new(),
+    );
+    let dummy_input = CellInput::new_builder()
+        .previous_output(dummy_input_out_point)
+        .build();
+
+    // Calculate Type ID: blake2b(first_input || output_index)
+    // output_index is 0 since ct-info-type cell is the first output
+    let type_id = calculate_type_id(&dummy_input, 0);
+
+    // Create ct-info-type script with Type ID as args
+    let type_script = context
+        .build_script(&out_point, Bytes::from(type_id.to_vec()))
         .unwrap();
 
     let output_data = create_ct_info_data(0, &issuer_pubkey, 1_000_000, MINTABLE);
@@ -497,6 +521,7 @@ fn test_ct_info_genesis() {
         .build()];
 
     let tx = TransactionBuilder::default()
+        .input(dummy_input)
         .outputs(outputs)
         .outputs_data(vec![output_data].pack())
         .build();
@@ -1201,15 +1226,26 @@ fn test_ct_info_genesis_zero_issuer() {
 
     let zero_pubkey = [0u8; 32];
 
-    let token_id = [10u8; 32];
-    let mut type_args = Vec::new();
-    type_args.extend_from_slice(&token_id);
-    type_args.push(0);
-
-    let type_script = context.build_script(&out_point, type_args.into()).unwrap();
-
     let lock_script = context
         .build_script(&always_success_out_point, Bytes::new())
+        .unwrap();
+
+    // Create a dummy input cell for Type ID calculation
+    let dummy_input_out_point = context.create_cell(
+        CellOutput::new_builder()
+            .capacity(1000)
+            .lock(lock_script.clone())
+            .build(),
+        Bytes::new(),
+    );
+    let dummy_input = CellInput::new_builder()
+        .previous_output(dummy_input_out_point)
+        .build();
+
+    // Calculate Type ID
+    let type_id = calculate_type_id(&dummy_input, 0);
+    let type_script = context
+        .build_script(&out_point, Bytes::from(type_id.to_vec()))
         .unwrap();
 
     let output_data = create_ct_info_data(0, &zero_pubkey, 1_000_000, MINTABLE);
@@ -1221,6 +1257,7 @@ fn test_ct_info_genesis_zero_issuer() {
         .build()];
 
     let tx = TransactionBuilder::default()
+        .input(dummy_input)
         .outputs(outputs)
         .outputs_data(vec![output_data].pack())
         .build();
@@ -1242,15 +1279,26 @@ fn test_ct_info_genesis_not_mintable() {
     let signing_key = SigningKey::generate(&mut csprng);
     let issuer_pubkey: [u8; 32] = signing_key.verifying_key().to_bytes();
 
-    let token_id = [11u8; 32];
-    let mut type_args = Vec::new();
-    type_args.extend_from_slice(&token_id);
-    type_args.push(0);
-
-    let type_script = context.build_script(&out_point, type_args.into()).unwrap();
-
     let lock_script = context
         .build_script(&always_success_out_point, Bytes::new())
+        .unwrap();
+
+    // Create a dummy input cell for Type ID calculation
+    let dummy_input_out_point = context.create_cell(
+        CellOutput::new_builder()
+            .capacity(1000)
+            .lock(lock_script.clone())
+            .build(),
+        Bytes::new(),
+    );
+    let dummy_input = CellInput::new_builder()
+        .previous_output(dummy_input_out_point)
+        .build();
+
+    // Calculate Type ID
+    let type_id = calculate_type_id(&dummy_input, 0);
+    let type_script = context
+        .build_script(&out_point, Bytes::from(type_id.to_vec()))
         .unwrap();
 
     // Create with flags = 0 (no MINTABLE)
@@ -1263,6 +1311,7 @@ fn test_ct_info_genesis_not_mintable() {
         .build()];
 
     let tx = TransactionBuilder::default()
+        .input(dummy_input)
         .outputs(outputs)
         .outputs_data(vec![output_data].pack())
         .build();
@@ -2978,15 +3027,26 @@ fn test_ct_info_genesis_multiple_outputs() {
     let signing_key = SigningKey::generate(&mut csprng);
     let issuer_pubkey: [u8; 32] = signing_key.verifying_key().to_bytes();
 
-    let token_id = [52u8; 32];
-    let mut type_args = Vec::new();
-    type_args.extend_from_slice(&token_id);
-    type_args.push(0);
-
-    let type_script = context.build_script(&out_point, type_args.into()).unwrap();
-
     let lock_script = context
         .build_script(&always_success_out_point, Bytes::new())
+        .unwrap();
+
+    // Create a dummy input cell for Type ID calculation
+    let dummy_input_out_point = context.create_cell(
+        CellOutput::new_builder()
+            .capacity(1000)
+            .lock(lock_script.clone())
+            .build(),
+        Bytes::new(),
+    );
+    let dummy_input = CellInput::new_builder()
+        .previous_output(dummy_input_out_point)
+        .build();
+
+    // Calculate Type ID (for output index 0)
+    let type_id = calculate_type_id(&dummy_input, 0);
+    let type_script = context
+        .build_script(&out_point, Bytes::from(type_id.to_vec()))
         .unwrap();
 
     let output_data = create_ct_info_data(0, &issuer_pubkey, 1_000_000, MINTABLE);
@@ -3006,6 +3066,7 @@ fn test_ct_info_genesis_multiple_outputs() {
     ];
 
     let tx = TransactionBuilder::default()
+        .input(dummy_input)
         .outputs(outputs)
         .outputs_data(vec![output_data.clone(), output_data].pack())
         .build();
@@ -3420,15 +3481,26 @@ fn test_ct_info_data_wrong_length() {
     let out_point = context.deploy_cell_by_name("ct-info-type");
     let always_success_out_point = context.deploy_cell(ALWAYS_SUCCESS.clone());
 
-    let token_id = [57u8; 32];
-    let mut type_args = Vec::new();
-    type_args.extend_from_slice(&token_id);
-    type_args.push(0);
-
-    let type_script = context.build_script(&out_point, type_args.into()).unwrap();
-
     let lock_script = context
         .build_script(&always_success_out_point, Bytes::new())
+        .unwrap();
+
+    // Create a dummy input cell for Type ID calculation
+    let dummy_input_out_point = context.create_cell(
+        CellOutput::new_builder()
+            .capacity(1000)
+            .lock(lock_script.clone())
+            .build(),
+        Bytes::new(),
+    );
+    let dummy_input = CellInput::new_builder()
+        .previous_output(dummy_input_out_point)
+        .build();
+
+    // Calculate Type ID
+    let type_id = calculate_type_id(&dummy_input, 0);
+    let type_script = context
+        .build_script(&out_point, Bytes::from(type_id.to_vec()))
         .unwrap();
 
     // Wrong data length: 88 bytes instead of 89
@@ -3441,6 +3513,7 @@ fn test_ct_info_data_wrong_length() {
         .build()];
 
     let tx = TransactionBuilder::default()
+        .input(dummy_input)
         .outputs(outputs)
         .outputs_data(vec![invalid_data].pack())
         .build();
