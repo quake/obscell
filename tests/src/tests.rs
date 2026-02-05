@@ -63,6 +63,9 @@ mod stealth_lock_error {
 }
 
 // Error codes for ct-info-type
+// Error codes for ct-info-type
+// NOTE: Authorization (signature verification) is handled by the LOCK SCRIPT,
+// not the type script. The type script only validates state transitions.
 #[allow(dead_code)]
 mod ct_info_error {
     pub const INVALID_DATA_LENGTH: i8 = 5;
@@ -71,8 +74,8 @@ mod ct_info_error {
     pub const MINTING_DISABLED: i8 = 9;
     pub const SUPPLY_CAP_EXCEEDED: i8 = 10;
     pub const INVALID_MINT_AMOUNT: i8 = 11;
-    pub const INVALID_SIGNATURE: i8 = 13;
-    pub const WITNESS_FORMAT_ERROR: i8 = 15;
+    pub const INVALID_MINT_COMMITMENT: i8 = 13;
+    pub const WITNESS_FORMAT_ERROR: i8 = 14;
 }
 
 // Error codes for ct-token-type
@@ -714,8 +717,10 @@ fn test_ct_info_mint_exceed_cap() {
 }
 
 #[test]
-fn test_ct_info_mint_without_signature() {
-    // Test: Try to mint without valid signature (should fail)
+fn test_ct_info_mint_without_mint_commitment() {
+    // Test: Try to mint without providing mint_commitment in witness (should fail)
+    // NOTE: Authorization is handled by lock script, not type script.
+    //       This test verifies that mint_commitment is required in witness.
     let mut context = Context::default();
     let out_point = context.deploy_cell_by_name("ct-info-type");
     let always_success_out_point = context.deploy_cell(ALWAYS_SUCCESS.clone());
@@ -769,12 +774,13 @@ fn test_ct_info_mint_without_signature() {
         .outputs_data(vec![output_data].pack())
         .build();
 
-    // No signature provided
+    // No mint_commitment provided in witness
     let tx = context.complete_tx(tx);
 
-    // Should fail with WitnessFormatError or InvalidSignature
+    // Should fail with WitnessFormatError (missing mint_commitment)
     let result = context.verify_tx(&tx, 20_000_000);
-    assert!(result.is_err(), "should fail without signature");
+    assert!(result.is_err(), "should fail without mint_commitment");
+    println!("test_ct_info_mint_without_mint_commitment: passed (correctly rejected)");
 }
 
 #[test]
@@ -1126,96 +1132,10 @@ fn test_ct_info_decrease_supply() {
     println!("test_ct_info_decrease_supply: passed (correctly rejected)");
 }
 
-#[test]
-fn test_ct_info_wrong_signature_key() {
-    // Test: Using wrong private key for signature should fail with InvalidSignature
-    let mut context = Context::default();
-    let out_point = context.deploy_cell_by_name("ct-info-type");
-    let always_success_out_point = context.deploy_cell(ALWAYS_SUCCESS.clone());
-
-    let mut csprng = OsRng;
-
-    // Generate issuer keypair (used in cell data)
-    let signing_key1 = SigningKey::generate(&mut csprng);
-    let issuer_pubkey: [u8; 32] = signing_key1.verifying_key().to_bytes();
-
-    // Generate a DIFFERENT keypair for signing
-    let signing_key2 = SigningKey::generate(&mut csprng);
-
-    let token_id = [9u8; 32];
-    let mut type_args = Vec::new();
-    type_args.extend_from_slice(&token_id);
-    type_args.push(0);
-
-    let type_script = context.build_script(&out_point, type_args.into()).unwrap();
-
-    let lock_script = context
-        .build_script(&always_success_out_point, Bytes::new())
-        .unwrap();
-
-    let input_data = create_ct_info_data(0, &issuer_pubkey, 1_000_000, MINTABLE);
-
-    let input_out_point = context.create_cell(
-        CellOutput::new_builder()
-            .capacity(1000)
-            .lock(lock_script.clone())
-            .type_(Some(type_script.clone()))
-            .build(),
-        input_data,
-    );
-
-    let input = CellInput::new_builder()
-        .previous_output(input_out_point)
-        .build();
-
-    let old_supply = 0u128;
-    let new_supply = 100u128;
-    let output_data = create_ct_info_data(new_supply, &issuer_pubkey, 1_000_000, MINTABLE);
-
-    let outputs = vec![CellOutput::new_builder()
-        .capacity(1000)
-        .lock(lock_script)
-        .type_(Some(type_script))
-        .build()];
-
-    let cell_deps = vec![CellDep::new_builder().out_point(out_point).build()].pack();
-
-    let tx = TransactionBuilder::default()
-        .cell_deps(cell_deps)
-        .input(input)
-        .outputs(outputs)
-        .outputs_data(vec![output_data].pack())
-        .build();
-
-    let tx = context.complete_tx(tx);
-
-    let tx_hash = tx.hash().raw_data();
-    let mut message = Vec::new();
-    message.extend_from_slice(&tx_hash);
-    message.extend_from_slice(&old_supply.to_le_bytes());
-    message.extend_from_slice(&new_supply.to_le_bytes());
-
-    // Sign with WRONG key
-    let signature: Signature = signing_key2.sign(&message);
-
-    // Compute mint commitment for the minted amount
-    let minted_amount = new_supply - old_supply;
-    let mint_commitment = compute_mint_commitment(minted_amount);
-
-    let witness_args = WitnessArgs::new_builder()
-        .input_type(Some(Bytes::from(signature.to_bytes().to_vec())))
-        .output_type(Some(mint_commitment))
-        .build();
-
-    let tx = tx
-        .as_advanced_builder()
-        .set_witnesses(vec![witness_args.as_bytes().pack()])
-        .build();
-
-    let result = context.verify_tx(&tx, 20_000_000);
-    assert!(result.is_err(), "should fail with wrong signature key");
-    println!("test_ct_info_wrong_signature_key: passed (correctly rejected)");
-}
+// NOTE: Signature verification tests have been removed.
+// Authorization (signature verification) is the responsibility of the LOCK SCRIPT,
+// not the type script. The type script only validates state transitions.
+// See docs/ct-info-type-design.md for more details.
 
 #[test]
 fn test_ct_info_genesis_zero_issuer() {
@@ -3236,80 +3156,8 @@ fn test_ct_info_unlimited_supply_cap() {
     );
 }
 
-#[test]
-fn test_ct_info_invalid_signature_length() {
-    // Test: Signature length is not 64 bytes should fail with InvalidSignature
-    let mut context = Context::default();
-    let out_point = context.deploy_cell_by_name("ct-info-type");
-    let always_success_out_point = context.deploy_cell(ALWAYS_SUCCESS.clone());
-
-    let mut csprng = OsRng;
-    let signing_key = SigningKey::generate(&mut csprng);
-    let issuer_pubkey: [u8; 32] = signing_key.verifying_key().to_bytes();
-
-    let token_id = [54u8; 32];
-    let mut type_args = Vec::new();
-    type_args.extend_from_slice(&token_id);
-    type_args.push(0);
-
-    let type_script = context.build_script(&out_point, type_args.into()).unwrap();
-
-    let lock_script = context
-        .build_script(&always_success_out_point, Bytes::new())
-        .unwrap();
-
-    let input_data = create_ct_info_data(0, &issuer_pubkey, 1_000_000, MINTABLE);
-
-    let input_out_point = context.create_cell(
-        CellOutput::new_builder()
-            .capacity(1000)
-            .lock(lock_script.clone())
-            .type_(Some(type_script.clone()))
-            .build(),
-        input_data,
-    );
-
-    let input = CellInput::new_builder()
-        .previous_output(input_out_point)
-        .build();
-
-    let output_data = create_ct_info_data(100, &issuer_pubkey, 1_000_000, MINTABLE);
-
-    let outputs = vec![CellOutput::new_builder()
-        .capacity(1000)
-        .lock(lock_script)
-        .type_(Some(type_script))
-        .build()];
-
-    let cell_deps = vec![CellDep::new_builder().out_point(out_point).build()].pack();
-
-    let tx = TransactionBuilder::default()
-        .cell_deps(cell_deps)
-        .input(input)
-        .outputs(outputs)
-        .outputs_data(vec![output_data].pack())
-        .build();
-
-    let tx = context.complete_tx(tx);
-
-    // Wrong signature length: 63 bytes instead of 64
-    let invalid_signature = vec![0u8; 63];
-    let mint_commitment = compute_mint_commitment(100);
-
-    let witness_args = WitnessArgs::new_builder()
-        .input_type(Some(Bytes::from(invalid_signature)))
-        .output_type(Some(mint_commitment))
-        .build();
-
-    let tx = tx
-        .as_advanced_builder()
-        .set_witnesses(vec![witness_args.as_bytes().pack()])
-        .build();
-
-    let result = context.verify_tx(&tx, 20_000_000);
-    assert_script_error(result, ct_info_error::INVALID_SIGNATURE);
-    println!("test_ct_info_invalid_signature_length: passed (correctly rejected)");
-}
+// NOTE: test_ct_info_invalid_signature_length has been removed.
+// Signature verification is the responsibility of the LOCK SCRIPT, not the type script.
 
 #[test]
 fn test_ct_info_zero_mint_amount() {

@@ -56,7 +56,7 @@ Offset | Size | Field         | Description
 0      | 16   | total_supply  | Current total supply (u128, little-endian)
 16     | 32   | issuer_pubkey | Ed25519 public key (immutable)
 48     | 16   | supply_cap    | Max supply, 0 = unlimited (immutable)
-64     | 24   | reserved      | Reserved for future use
+64     | 24   | reserved      | Reserved for future use (immutable after genesis)
 88     | 1    | flags         | Bit flags (see below)
 ```
 
@@ -115,22 +115,27 @@ Immutability Checks:
   a) output.token_id == input.token_id
   b) output.issuer_pubkey == input.issuer_pubkey
   c) output.supply_cap == input.supply_cap
-  d) output.flags == input.flags
+  d) output.reserved == input.reserved
+  e) output.flags == input.flags
 
 Mint Validation:
-  e) input.flags & MINTABLE == MINTABLE
-  f) minted_amount = output.total_supply - input.total_supply
-  g) minted_amount > 0
-  h) IF input.supply_cap > 0 THEN output.total_supply <= input.supply_cap
-  i) No overflow: output.total_supply >= input.total_supply
+  f) input.flags & MINTABLE == MINTABLE
+  g) minted_amount = output.total_supply - input.total_supply
+  h) minted_amount > 0
+  i) IF input.supply_cap > 0 THEN output.total_supply <= input.supply_cap
+  j) No overflow: output.total_supply >= input.total_supply
 
 Authorization:
-  j) Verify issuer Ed25519 signature in witness.input_type
-  k) Message = tx_hash || input.total_supply || output.total_supply
+  NOTE: Authorization is NOT handled by this type script.
+  The lock script of the ct-info-type cell is responsible for verifying
+  that the transaction is authorized (e.g., via issuer signature).
+  This follows CKB's separation of concerns:
+    - Lock script: WHO can spend the cell (authorization)
+    - Type script: WHAT state transitions are valid (validation)
 
 Mint Commitment:
-  l) Compute mint_commitment = minted_amount * G + 0 * H
-  m) Store compressed mint_commitment in witness.output_type
+  k) Compute mint_commitment = minted_amount * G + 0 * H
+  l) Verify mint_commitment in witness.output_type matches expected value
 
 Result: PASS if all checks succeed
 ```
@@ -144,8 +149,8 @@ FAIL if:
   - Immutable fields changed
   - Minting when MINTABLE flag not set
   - Supply exceeds cap
-  - Missing or invalid issuer signature
   - Arithmetic overflow
+  - Invalid mint commitment
 ```
 
 ### CT-Token-Type Script (Modified)
@@ -330,34 +335,30 @@ witness.output_type = Some(mint_commitment.compress().to_bytes());
 - Simplifies verification
 - Recipients can re-blind when creating transfer commitments
 
-### Issuer Signature
+### Authorization (Lock Script Responsibility)
 
-**Algorithm**: Ed25519 (standard, widely supported)
+**IMPORTANT**: Authorization is NOT handled by ct-info-type (type script).
+Following CKB's design principles:
+- **Lock script**: Verifies WHO can spend a cell (authorization)
+- **Type script**: Verifies WHAT state transitions are valid (validation)
 
-**Message Format**:
-```
-message = tx_hash || old_supply_bytes || new_supply_bytes
+The ct-info-type cell's lock script is responsible for ensuring only
+authorized parties (e.g., the issuer) can mint new tokens.
 
-Where:
-  tx_hash: [u8; 32] - Transaction hash
-  old_supply_bytes: [u8; 16] - u128 little-endian
-  new_supply_bytes: [u8; 16] - u128 little-endian
+**Recommended Lock Script Implementation**:
 
-Total: 64 bytes
-```
+For production use, choose a battle-tested lock script that has been deployed
+and verified on CKB mainnet. The CKB ecosystem provides several production-ready
+lock scripts with different authorization mechanisms.
 
-**Signature Location**: `witness[0].input_type` (64 bytes)
+**Key Requirements**:
+- Must verify that only authorized parties can spend the ct-info-type cell
+- Should be well-audited and production-proven on CKB mainnet
+- Consider using existing lock scripts from the CKB ecosystem rather than
+  implementing custom authorization logic
 
-**Verification**:
-```rust
-use ed25519_dalek::{PublicKey, Signature, Verifier};
-
-let pubkey = PublicKey::from_bytes(&issuer_pubkey)?;
-let signature = Signature::from_bytes(&witness_signature)?;
-let message = construct_message(tx_hash, old_supply, new_supply);
-
-pubkey.verify(&message, &signature)?;
-```
+**WARNING**: Using ALWAYS_SUCCESS as lock script allows ANYONE to mint tokens.
+This is only acceptable for testing purposes.
 
 ### Integration with CT-Token-Type
 
@@ -408,10 +409,14 @@ verify_range_proofs(...)?;
 - Single ct-info-type cell enforces serialization
 
 **S2: Authorization**
-- Issuer Ed25519 signature required for every mint
-- Signature covers tx_hash (prevents replay)
-- Issuer pubkey immutable after genesis
-- Private key held off-chain by issuer
+- Authorization is handled by the LOCK SCRIPT of ct-info-type cell
+- Lock script verifies who can spend the cell (e.g., issuer signature)
+- Type script only validates state transitions, not authorization
+- This follows CKB's separation of concerns:
+  - Lock script: WHO can spend (authorization)
+  - Type script: WHAT transitions are valid (validation)
+- Issuer pubkey stored in cell data for reference/auditability
+- Recommended: Use a production-proven lock script from CKB ecosystem
 
 **S3: Cap Enforcement**
 - Supply cap immutable after genesis
@@ -455,12 +460,16 @@ Defense: ct-info-type script checks:
          IF cap > 0 THEN new_supply <= cap
 ```
 
-**Attack 4: Forge Signature**
+**Attack 4: Unauthorized Mint**
 ```
-Attempt: Mint without valid issuer signature
+Attempt: Mint without proper authorization
 
-Defense: Ed25519 signature verification in ct-info-type script
-         Cryptographically secure (128-bit security)
+Defense: Lock script of ct-info-type cell handles authorization.
+         The lock script must verify the transaction is authorized
+         (e.g., by checking issuer signature). 
+         
+         IMPORTANT: If using ALWAYS_SUCCESS as lock script, anyone can mint!
+         Production deployments MUST use a proper authorization lock script.
 ```
 
 **Attack 5: Change Issuer**

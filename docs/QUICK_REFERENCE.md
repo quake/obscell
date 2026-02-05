@@ -6,10 +6,10 @@
 ```rust
 struct CtInfoData {
     total_supply: u128,      // [0..16]   Current supply
-    issuer_pubkey: [u8; 32], // [16..48]  Ed25519 public key
-    supply_cap: u128,        // [48..64]  Max supply (0 = unlimited)
-    reserved: [u8; 24],      // [64..88]  Reserved
-    flags: u8,               // [88]      MINTABLE = 0x01
+    issuer_pubkey: [u8; 32], // [16..48]  Ed25519 public key (immutable)
+    supply_cap: u128,        // [48..64]  Max supply, 0 = unlimited (immutable)
+    reserved: [u8; 24],      // [64..88]  Reserved (immutable)
+    flags: u8,               // [88]      MINTABLE = 0x01 (immutable)
 }
 ```
 
@@ -40,23 +40,18 @@ TransactionBuilder::default()
 ### 2. Mint Tokens
 ```rust
 // 1 input (old ct-info), 1 output (new ct-info) + ct-token outputs
+// NOTE: Authorization is handled by LOCK SCRIPT, not type script!
+
 let old_supply = 1000u128;
 let new_supply = 1100u128;
 let minted = 100u128;
 
-// Sign: tx_hash || old_supply || new_supply
-let mut message = Vec::new();
-message.extend_from_slice(&tx_hash);
-message.extend_from_slice(&old_supply.to_le_bytes());
-message.extend_from_slice(&new_supply.to_le_bytes());
-let signature = issuer_key.sign(&message);
-
 // Create mint commitment
 let mint_commitment = minted * RISTRETTO_BASEPOINT_POINT;
 
-// Witness
+// Witness for type script (mint_commitment only)
+// Lock script witness handles authorization separately
 WitnessArgs::new_builder()
-    .input_type(Some(signature.to_bytes().into()))  // 64 bytes
     .output_type(Some(mint_commitment.compress().to_bytes().into()))  // 32 bytes
     .build();
 ```
@@ -66,10 +61,6 @@ WitnessArgs::new_builder()
 // Check supply update
 assert_eq!(new_supply, old_supply + minted);
 
-// Verify signature
-let verifying_key = VerifyingKey::from_bytes(&issuer_pubkey)?;
-verifying_key.verify(&message, &signature)?;
-
 // Check cap
 if supply_cap > 0 {
     assert!(new_supply <= supply_cap);
@@ -77,6 +68,8 @@ if supply_cap > 0 {
 
 // Verify ct-token outputs sum to minted amount
 assert_eq!(ct_token_commitments.sum(), mint_commitment);
+
+// NOTE: Authorization (signature) is verified by lock script, not type script
 ```
 
 ## Error Codes
@@ -86,14 +79,13 @@ assert_eq!(ct_token_commitments.sum(), mint_commitment);
 | 5 | InvalidDataLength | Cell data != 89 bytes |
 | 6 | InvalidArgsLength | Type args != 33 bytes |
 | 7 | InvalidCellCount | Wrong number of inputs/outputs |
-| 8 | ImmutableFieldChanged | Changed issuer/cap/flags |
+| 8 | ImmutableFieldChanged | Changed issuer/cap/reserved/flags |
 | 9 | MintingDisabled | MINTABLE flag not set |
 | 10 | SupplyCapExceeded | new_supply > cap |
 | 11 | InvalidMintAmount | minted <= 0 |
 | 12 | SupplyOverflow | Arithmetic overflow |
-| 13 | InvalidSignature | Bad Ed25519 signature |
-| 14 | InvalidMintCommitment | Bad mint commitment |
-| 15 | WitnessFormatError | Missing witness data |
+| 13 | InvalidMintCommitment | Bad mint commitment |
+| 14 | WitnessFormatError | Missing witness data |
 
 ## Validation Rules
 
@@ -105,10 +97,14 @@ assert_eq!(ct_token_commitments.sum(), mint_commitment);
 - ✓ token_id unchanged
 - ✓ issuer_pubkey unchanged
 - ✓ supply_cap unchanged
+- ✓ reserved unchanged
 - ✓ flags unchanged
 - ✓ minted = new_supply - old_supply > 0
 - ✓ new_supply <= cap (if cap > 0)
-- ✓ Valid Ed25519 signature
+- ✓ Valid mint_commitment in witness
+
+**NOTE**: Authorization (e.g., signature verification) is handled by the LOCK SCRIPT,
+not the type script. Use an appropriate lock script to protect ct-info-type cells.
 
 ## Integration with CT-Token-Type
 
@@ -135,6 +131,7 @@ let issuer_pubkey = issuer_key.verifying_key().to_bytes();
 let token_id = [1u8; 32];
 
 // 2. Create token (genesis)
+// NOTE: Use proper lock script for authorization!
 let genesis_data = create_ct_info_data(0, &issuer_pubkey, 1_000_000, 0x01);
 // ... build and submit genesis tx
 
@@ -145,14 +142,6 @@ let new_supply = 100u128;
 // Input: ct-info cell with old supply
 // Output: ct-info cell with new supply + ct-token cells
 
-// Sign
-let tx_hash = tx.hash().raw_data();
-let mut message = Vec::new();
-message.extend_from_slice(&tx_hash);
-message.extend_from_slice(&old_supply.to_le_bytes());
-message.extend_from_slice(&new_supply.to_le_bytes());
-let signature = issuer_key.sign(&message);
-
 // Compute mint commitment
 let pc_gens = PedersenGens::default();
 let mint_commitment = pc_gens.commit(Scalar::from(100u64), Scalar::zero());
@@ -160,9 +149,9 @@ let mint_commitment = pc_gens.commit(Scalar::from(100u64), Scalar::zero());
 // Create ct-token outputs with range proofs
 // ... (see ct-token-type tests)
 
-// Witness
+// Witness for type script (mint_commitment)
+// NOTE: Lock script handles authorization (e.g., signature in witness.lock)
 let witness = WitnessArgs::new_builder()
-    .input_type(Some(signature.to_bytes().into()))
     .output_type(Some(mint_commitment.compress().to_bytes().into()))
     .build();
 
@@ -179,7 +168,7 @@ make build CONTRACT=ct-info-type
 cargo test test_ct_info_genesis
 cargo test test_ct_info_mint_basic
 cargo test test_ct_info_mint_exceed_cap
-cargo test test_ct_info_mint_without_signature
+cargo test test_ct_info_mint_without_mint_commitment
 ```
 
 ## Key Insights
@@ -188,15 +177,25 @@ cargo test test_ct_info_mint_without_signature
 2. **Transfers are Private**: ct-token amounts remain confidential
 3. **Single Info Cell**: One ct-info-type cell per token enforces serialization
 4. **Mint Commitment**: Uses zero blinding factor (minted amount is public anyway)
-5. **Signature Covers TX**: tx_hash in message prevents replay attacks
-6. **Immutable Authority**: Issuer cannot be changed after genesis
+5. **Lock Script Authorization**: Type script validates state, lock script authorizes
+6. **Immutable Authority**: Issuer pubkey cannot be changed after genesis
 7. **Cap Optional**: supply_cap = 0 means unlimited minting
 
 ## Security Notes
 
+- ⚠️ Use proper lock script for authorization (NOT always_success in production!)
 - ⚠️ Keep issuer private key secure (no key rotation after genesis)
 - ⚠️ Set supply_cap in genesis (cannot change later)
 - ⚠️ Minted amounts are PUBLIC (supply delta visible)
 - ✓ Transfer amounts remain PRIVATE (Pedersen commitments)
 - ✓ Recipients hidden by stealth addresses
 - ✓ Range proofs prevent negative amounts
+
+## CKB Design Principle
+
+Following CKB's separation of concerns:
+- **Lock Script**: WHO can spend a cell (authorization)
+- **Type Script**: WHAT state transitions are valid (validation)
+
+The ct-info-type script only validates state transitions (supply changes, immutability).
+Authorization (e.g., issuer signature) must be enforced by the lock script.

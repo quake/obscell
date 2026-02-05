@@ -182,6 +182,9 @@ fn validate_mint() -> Result<(), Error> {
     if input_info.supply_cap != output_info.supply_cap {
         return Err(Error::ImmutableFieldChanged);
     }
+    if input_info.reserved != output_info.reserved {
+        return Err(Error::ImmutableFieldChanged);
+    }
     if input_info.flags != output_info.flags {
         return Err(Error::ImmutableFieldChanged);
     }

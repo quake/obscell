@@ -10,11 +10,11 @@ use ckb_std::{
     ckb_types::prelude::Unpack,
     error::SysError,
     high_level::{
-        QueryIter, load_cell_data, load_cell_type_hash, load_script, load_tx_hash,
-        load_witness_args,
+        load_cell_data, load_cell_type_hash, load_script, load_tx_hash, load_witness_args,
+        QueryIter,
     },
 };
-use curve25519_dalek::{RistrettoPoint, ristretto::CompressedRistretto};
+use curve25519_dalek::{ristretto::CompressedRistretto, RistrettoPoint};
 use merlin::Transcript;
 
 #[cfg(not(any(feature = "library", test)))]
@@ -136,6 +136,11 @@ fn auth() -> Result<(), Error> {
         if input_sum != output_sum {
             return Err(Error::InputOutputSumMismatch);
         }
+    }
+
+    // Must have at least one output to verify
+    if value_commitments.is_empty() {
+        return Err(Error::InvalidOutput);
     }
 
     let witness_args = load_witness_args(0, Source::GroupOutput)?
