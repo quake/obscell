@@ -7,10 +7,10 @@
 
 Complete technical design document covering:
 - Architecture decision (Approach A: separate ct-info-type)
-- Cell layouts (89 bytes for ct-info-type, unchanged 64 bytes for ct-token-type)
+- Cell layouts (57 bytes for ct-info-type, unchanged 64 bytes for ct-token-type)
 - Validation rules (genesis, mint, error cases)
 - Transaction structures (genesis, pure mint, mint+transfer)
-- Cryptographic details (Ed25519 signatures, mint commitments)
+- Cryptographic details (mint commitments)
 - Security analysis (threat model, attack scenarios)
 - Testing strategy
 
@@ -18,12 +18,11 @@ Complete technical design document covering:
 **File**: `contracts/ct-info-type/src/main.rs`
 
 Implemented ct-info-type script with:
-- `CtInfoData` structure (89 bytes: supply, issuer, cap, flags)
+- `CtInfoData` structure (57 bytes: supply, cap, flags)
 - Genesis validation (0 inputs → 1 output)
 - Mint validation (1 input → 1 output)
-- Immutability checks (issuer, cap, flags)
+- Immutability checks (cap, flags)
 - Supply cap enforcement
-- Ed25519 signature verification
 - Mint commitment computation
 
 **Error Codes**:
@@ -36,9 +35,6 @@ MintingDisabled = 9
 SupplyCapExceeded = 10
 InvalidMintAmount = 11
 SupplyOverflow = 12
-InvalidSignature = 13
-InvalidMintCommitment = 14
-WitnessFormatError = 15
 ```
 
 ### 3. CT-Token-Type Modification ✓
@@ -81,11 +77,10 @@ ed25519-dalek = { version = "2", features = ["rand_core"] }
 ```
 Transaction:
   Inputs:  (none)
-  Outputs: ct-info-type cell (supply=0, issuer_pubkey, cap, flags)
+  Outputs: ct-info-type cell (supply=0, cap, flags)
   
 Validation:
   ✓ Exactly 1 output
-  ✓ Issuer pubkey is set
   ✓ MINTABLE flag is set
 ```
 
@@ -97,7 +92,6 @@ Transaction:
            ct-token cells (sum = 100)
   
 Witness:
-  [0].input_type: Ed25519 signature (64 bytes)
   [0].output_type: mint_commitment (32 bytes)
   [1].output_type: range_proof (Bulletproofs)
   
@@ -106,7 +100,7 @@ Validation (ct-info-type):
   ✓ MINTABLE flag is set
   ✓ minted = 1100 - 1000 = 100 > 0
   ✓ new_supply <= cap (if cap > 0)
-  ✓ Valid issuer signature
+  ✓ Lock script authorizes the transaction
   
 Validation (ct-token-type):
   ✓ input_sum + mint_commitment(100) = output_sum
@@ -116,20 +110,19 @@ Validation (ct-token-type):
 ### Security Properties
 
 1. **Supply Integrity**: Total supply is public and verified on-chain
-2. **Authorization**: Only issuer can mint (Ed25519 signature required)
+2. **Authorization**: Only lock script owner can mint (lock script controls access)
 3. **Cap Enforcement**: Cannot exceed supply_cap if set
 4. **Commitment Consistency**: Minted tokens sum to declared amount
 5. **Privacy Preservation**: Transfer amounts remain confidential
 
 ## Cell Data Layouts
 
-### CT-Info-Type Cell (89 bytes)
+### CT-Info-Type Cell (57 bytes)
 ```
 [0..16]   total_supply: u128        (public)
-[16..48]  issuer_pubkey: [u8; 32]   (Ed25519 public key)
-[48..64]  supply_cap: u128          (0 = unlimited)
-[64..88]  reserved: [u8; 24]        (future use)
-[88]      flags: u8                 (bit 0 = MINTABLE)
+[16..32]  supply_cap: u128          (0 = unlimited)
+[32..56]  reserved: [u8; 24]        (future use)
+[56]      flags: u8                 (bit 0 = MINTABLE)
 ```
 
 ### CT-Token-Type Cell (64 bytes, unchanged)
@@ -145,13 +138,13 @@ Validation (ct-token-type):
 // Create token with cap of 1,000,000
 let ct_info_data = CtInfoData {
     total_supply: 0,
-    issuer_pubkey: [issuer_ed25519_pubkey],
     supply_cap: 1_000_000,
     flags: MINTABLE,
     reserved: [0; 24],
 };
 
 // Transaction has 0 inputs, 1 ct-info-type output
+// Lock script determines who can mint
 ```
 
 ### Example 2: Mint 100 Tokens
@@ -160,15 +153,12 @@ let ct_info_data = CtInfoData {
 // Output: ct-info cell (supply: 100)
 //         + 2 ct-token cells (60 + 40 = 100)
 
-// Sign message: tx_hash || old_supply(0) || new_supply(100)
-let signature = issuer_key.sign(message);
-
 // Create mint commitment: 100*G + 0*H
 let mint_commitment = compute_mint_commitment(100);
 
 // Witness[0]:
-//   input_type: signature (64 bytes)
 //   output_type: mint_commitment (32 bytes)
+// Lock script handles authorization
 ```
 
 ## Building and Testing
@@ -188,8 +178,7 @@ cargo test test_ct_info_mint_exceed_cap  # Test cap enforcement
 ```
 
 ### Expected Cycle Consumption
-- **ct-info-type validation**: ~5-10M cycles
-  - Ed25519 signature verification: ~5M
+- **ct-info-type validation**: ~1-2M cycles
   - Cell data parsing: ~100K
   - Mint commitment: ~2M
 - **ct-token-type validation**: ~500M-1B cycles (unchanged)
@@ -207,10 +196,8 @@ cargo test test_ct_info_mint_exceed_cap  # Test cap enforcement
 ### Production Checklist
 - [ ] Run full test suite with `make test`
 - [ ] Verify all cycle budgets are reasonable
-- [ ] Audit cryptographic implementations
 - [ ] Test edge cases (overflow, zero amounts, etc.)
 - [ ] Generate reproducible build checksums
-- [ ] Security review of signature verification
 - [ ] Test with mainnet parameters
 
 ## File Structure

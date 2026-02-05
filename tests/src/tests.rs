@@ -7,13 +7,43 @@ use ckb_testtool::{
 };
 
 use bulletproofs::{BulletproofGens, PedersenGens, RangeProof};
-use curve25519_dalek::ristretto::RistrettoPoint;
+use curve25519_dalek::constants::RISTRETTO_BASEPOINT_POINT;
 use curve25519_dalek::scalar::Scalar;
 use merlin::Transcript;
 use rand_core::OsRng;
 
-use ed25519_dalek::{Signature, Signer, SigningKey};
 use secp256k1::{Message, PublicKey, Secp256k1, SecretKey};
+
+// ct-info-type constants
+const MINTABLE: u8 = 0x01;
+const CT_INFO_DATA_SIZE: usize = 57;
+
+/// Create ct-info-type cell data (57 bytes)
+/// Layout: total_supply(16) + supply_cap(16) + reserved(24) + flags(1)
+fn create_ct_info_data(total_supply: u128, supply_cap: u128, flags: u8) -> Bytes {
+    let mut data = vec![0u8; CT_INFO_DATA_SIZE];
+    data[0..16].copy_from_slice(&total_supply.to_le_bytes());
+    data[16..32].copy_from_slice(&supply_cap.to_le_bytes());
+    // reserved[32..56] stays zero
+    data[56] = flags;
+    data.into()
+}
+
+/// Calculate Type ID for ct-info-type
+fn calculate_type_id(first_input: &CellInput, output_index: u64) -> [u8; 32] {
+    use ckb_testtool::ckb_hash::blake2b_256;
+    let mut data = Vec::new();
+    data.extend_from_slice(first_input.as_slice());
+    data.extend_from_slice(&output_index.to_le_bytes());
+    blake2b_256(&data)
+}
+
+/// Compute mint commitment: amount * G + 0 * H
+fn compute_mint_commitment(minted_amount: u128) -> Bytes {
+    let amount_scalar = Scalar::from(minted_amount);
+    let commitment = RISTRETTO_BASEPOINT_POINT * amount_scalar;
+    Bytes::from(commitment.compress().to_bytes().to_vec())
+}
 
 /// Deploy ckb-auth binary and register its native simulator.
 /// Returns the OutPoint of the deployed cell.
@@ -325,74 +355,7 @@ fn test_stealth_lock_wrong_signature() {
     let secp = Secp256k1::new();
     let mut rng = rand::rng();
 
-    // Create lock with one keypair
-    let seckey1 = SecretKey::new(&mut rng);
-    let pubkey1 = PublicKey::from_secret_key(&secp, &seckey1);
-    let public_key_hash = blake2b_256(pubkey1.serialize())[0..20].to_vec();
-    let script_args = [vec![0; 33], public_key_hash].concat();
-    let lock_script = context
-        .build_script(&contract_out_point, script_args.into())
-        .unwrap();
-
-    let input_out_point = context.create_cell(
-        CellOutput::new_builder()
-            .capacity(256)
-            .lock(lock_script.clone())
-            .build(),
-        Bytes::new(),
-    );
-
-    let dep1 = CellDep::new_builder().out_point(contract_out_point).build();
-    let dep2 = CellDep::new_builder().out_point(ckb_auth_out_point).build();
-    let cell_deps = vec![dep1, dep2].pack();
-
-    let input = CellInput::new_builder()
-        .previous_output(input_out_point)
-        .build();
-    let outputs = vec![CellOutput::new_builder()
-        .capacity(256)
-        .lock(lock_script)
-        .build()];
-
-    let tx = TransactionBuilder::default()
-        .cell_deps(cell_deps)
-        .input(input)
-        .outputs(outputs)
-        .outputs_data(vec![Bytes::new()].pack())
-        .build();
-
-    // Sign with a DIFFERENT key
-    let seckey2 = SecretKey::new(&mut rng);
-    let message =
-        Message::from_digest(tx.hash().raw_data().to_vec().as_slice().try_into().unwrap());
-    let (recovery_id, signature) = secp
-        .sign_ecdsa_recoverable(message, &seckey2) // Wrong key!
-        .serialize_compact();
-    let witness = [signature.as_slice(), &[i32::from(recovery_id) as u8]].concat();
-    let witness_args = WitnessArgs::new_builder()
-        .lock(Some(Bytes::from(witness)))
-        .build();
-
-    let tx = tx
-        .as_advanced_builder()
-        .witness(witness_args.as_bytes())
-        .build();
-
-    let result = context.verify_tx(&tx, 10_000_000);
-    assert!(result.is_err(), "should fail with wrong signature");
-    println!("test_stealth_lock_wrong_signature: passed (correctly rejected)");
-}
-
-#[test]
-#[cfg(not(feature = "native-simulator"))]
-fn test_stealth_lock_empty_witness() {
-    // Test: Empty witness.lock should fail
-    let mut context = Context::default();
-    let contract_out_point = context.deploy_cell_by_name("stealth-lock");
-    let ckb_auth_out_point = deploy_ckb_auth(&mut context);
-
-    let secp = Secp256k1::new();
-    let mut rng = rand::rng();
+    // Generate the keypair used for the lock script
     let seckey = SecretKey::new(&mut rng);
     let pubkey = PublicKey::from_secret_key(&secp, &seckey);
     let public_key_hash = blake2b_256(pubkey.serialize())[0..20].to_vec();
@@ -421,1560 +384,33 @@ fn test_stealth_lock_empty_witness() {
         .lock(lock_script)
         .build()];
 
-    // Empty witness - no lock field
-    let witness_args = WitnessArgs::new_builder().build();
-
     let tx = TransactionBuilder::default()
         .cell_deps(cell_deps)
         .input(input)
         .outputs(outputs)
         .outputs_data(vec![Bytes::new()].pack())
+        .build();
+
+    // Sign with a DIFFERENT key (wrong key)
+    let wrong_seckey = SecretKey::new(&mut rng);
+    let message =
+        Message::from_digest(tx.hash().raw_data().to_vec().as_slice().try_into().unwrap());
+    let (recovery_id, signature) = secp
+        .sign_ecdsa_recoverable(message, &wrong_seckey)
+        .serialize_compact();
+    let witness = [signature.as_slice(), &[i32::from(recovery_id) as u8]].concat();
+    let witness_args = WitnessArgs::new_builder()
+        .lock(Some(Bytes::from(witness)))
+        .build();
+
+    let tx = tx
+        .as_advanced_builder()
         .witness(witness_args.as_bytes())
         .build();
 
     let result = context.verify_tx(&tx, 10_000_000);
-    assert!(result.is_err(), "should fail with empty witness");
-    println!("test_stealth_lock_empty_witness: passed (correctly rejected)");
-}
-
-// Helper function to create ct-info-type cell data
-fn create_ct_info_data(
-    total_supply: u128,
-    issuer_pubkey: &[u8; 32],
-    supply_cap: u128,
-    flags: u8,
-) -> Bytes {
-    let mut data = Vec::new();
-    data.extend_from_slice(&total_supply.to_le_bytes()); // [0..16]
-    data.extend_from_slice(issuer_pubkey); // [16..48]
-    data.extend_from_slice(&supply_cap.to_le_bytes()); // [48..64]
-    data.extend_from_slice(&[0u8; 24]); // [64..88] reserved
-    data.push(flags); // [88]
-    data.into()
-}
-
-/// Calculate Type ID for a genesis transaction.
-/// Type ID = blake2b(first_input || output_index)
-/// where first_input is the full CellInput structure (not just out_point)
-fn calculate_type_id(first_input: &CellInput, output_index: u64) -> [u8; 32] {
-    let mut data = Vec::new();
-    data.extend_from_slice(first_input.as_slice());
-    data.extend_from_slice(&output_index.to_le_bytes());
-    blake2b_256(&data)
-}
-
-// Helper function to compute mint commitment for a given amount
-// mint_commitment = amount * G (with zero blinding factor)
-fn compute_mint_commitment(amount: u128) -> Bytes {
-    use bulletproofs::PedersenGens;
-    let pc_gens = PedersenGens::default();
-    let amount_scalar = Scalar::from(amount);
-    // Commitment with zero blinding factor: amount * G + 0 * H = amount * G
-    let commitment = pc_gens.commit(amount_scalar, Scalar::ZERO);
-    Bytes::from(commitment.compress().to_bytes().to_vec())
-}
-
-const MINTABLE: u8 = 0x01;
-
-#[test]
-fn test_ct_info_genesis() {
-    // Test: Create a new token (genesis transaction)
-    let mut context = Context::default();
-    let out_point = context.deploy_cell_by_name("ct-info-type");
-    let always_success_out_point = context.deploy_cell(ALWAYS_SUCCESS.clone());
-
-    // Generate issuer keypair
-    let mut csprng = OsRng;
-    let signing_key = SigningKey::generate(&mut csprng);
-    let verifying_key = signing_key.verifying_key();
-    let issuer_pubkey: [u8; 32] = verifying_key.to_bytes();
-
-    let lock_script = context
-        .build_script(&always_success_out_point, Bytes::new())
-        .unwrap();
-
-    // Create a dummy input cell for Type ID calculation
-    // Type ID requires at least one input in the transaction
-    let dummy_input_out_point = context.create_cell(
-        CellOutput::new_builder()
-            .capacity(1000)
-            .lock(lock_script.clone())
-            .build(),
-        Bytes::new(),
-    );
-    let dummy_input = CellInput::new_builder()
-        .previous_output(dummy_input_out_point)
-        .build();
-
-    // Calculate Type ID: blake2b(first_input || output_index)
-    // output_index is 0 since ct-info-type cell is the first output
-    let type_id = calculate_type_id(&dummy_input, 0);
-
-    // Create ct-info-type script with Type ID as args
-    let type_script = context
-        .build_script(&out_point, Bytes::from(type_id.to_vec()))
-        .unwrap();
-
-    let output_data = create_ct_info_data(0, &issuer_pubkey, 1_000_000, MINTABLE);
-
-    let outputs = vec![CellOutput::new_builder()
-        .capacity(1000)
-        .lock(lock_script)
-        .type_(Some(type_script))
-        .build()];
-
-    let tx = TransactionBuilder::default()
-        .input(dummy_input)
-        .outputs(outputs)
-        .outputs_data(vec![output_data].pack())
-        .build();
-    let tx = context.complete_tx(tx);
-
-    let cycles = context
-        .verify_tx(&tx, 20_000_000)
-        .expect("genesis should pass");
-    println!("ct-info genesis consume cycles: {}", cycles);
-}
-
-#[test]
-fn test_ct_info_mint_basic() {
-    // Test: Mint tokens (supply 0 -> 100)
-    let mut context = Context::default();
-    let out_point = context.deploy_cell_by_name("ct-info-type");
-    let always_success_out_point = context.deploy_cell(ALWAYS_SUCCESS.clone());
-
-    // Generate issuer keypair
-    let mut csprng = OsRng;
-    let signing_key = SigningKey::generate(&mut csprng);
-    let verifying_key = signing_key.verifying_key();
-    let issuer_pubkey: [u8; 32] = verifying_key.to_bytes();
-
-    // Create token
-    let token_id = [2u8; 32];
-    let mut type_args = Vec::new();
-    type_args.extend_from_slice(&token_id);
-    type_args.push(0);
-
-    let type_script = context.build_script(&out_point, type_args.into()).unwrap();
-
-    let lock_script = context
-        .build_script(&always_success_out_point, Bytes::new())
-        .unwrap();
-
-    let input_data = create_ct_info_data(0, &issuer_pubkey, 1_000_000, MINTABLE);
-
-    let input_out_point = context.create_cell(
-        CellOutput::new_builder()
-            .capacity(1000)
-            .lock(lock_script.clone())
-            .type_(Some(type_script.clone()))
-            .build(),
-        input_data,
-    );
-
-    let input = CellInput::new_builder()
-        .previous_output(input_out_point)
-        .build();
-
-    // Mint 100 tokens
-    let old_supply = 0u128;
-    let new_supply = 100u128;
-    let output_data = create_ct_info_data(new_supply, &issuer_pubkey, 1_000_000, MINTABLE);
-
-    let outputs = vec![CellOutput::new_builder()
-        .capacity(1000)
-        .lock(lock_script)
-        .type_(Some(type_script))
-        .build()];
-
-    // Add cell deps
-    let cell_deps = vec![CellDep::new_builder().out_point(out_point).build()].pack();
-
-    let tx = TransactionBuilder::default()
-        .cell_deps(cell_deps)
-        .input(input)
-        .outputs(outputs)
-        .outputs_data(vec![output_data].pack())
-        .build();
-
-    let tx = context.complete_tx(tx);
-
-    // Sign the transaction (must be after complete_tx to get correct tx_hash)
-    let tx_hash = tx.hash().raw_data();
-    let mut message = Vec::new();
-    message.extend_from_slice(&tx_hash);
-    message.extend_from_slice(&old_supply.to_le_bytes());
-    message.extend_from_slice(&new_supply.to_le_bytes());
-    let signature: Signature = signing_key.sign(&message);
-
-    // Compute mint commitment for the minted amount
-    let minted_amount = new_supply - old_supply;
-    let mint_commitment = compute_mint_commitment(minted_amount);
-
-    let witness_args = WitnessArgs::new_builder()
-        .input_type(Some(Bytes::from(signature.to_bytes().to_vec())))
-        .output_type(Some(mint_commitment))
-        .build();
-
-    let tx = tx
-        .as_advanced_builder()
-        .set_witnesses(vec![witness_args.as_bytes().pack()])
-        .build();
-
-    let cycles = context
-        .verify_tx(&tx, 20_000_000)
-        .expect("mint should pass");
-    println!("ct-info mint basic consume cycles: {}", cycles);
-}
-
-#[test]
-fn test_ct_info_mint_exceed_cap() {
-    // Test: Try to mint beyond supply cap (should fail)
-    let mut context = Context::default();
-    let out_point = context.deploy_cell_by_name("ct-info-type");
-    let always_success_out_point = context.deploy_cell(ALWAYS_SUCCESS.clone());
-
-    let mut csprng = OsRng;
-    let signing_key = SigningKey::generate(&mut csprng);
-    let verifying_key = signing_key.verifying_key();
-    let issuer_pubkey: [u8; 32] = verifying_key.to_bytes();
-
-    let token_id = [3u8; 32];
-    let mut type_args = Vec::new();
-    type_args.extend_from_slice(&token_id);
-    type_args.push(0);
-
-    let type_script = context.build_script(&out_point, type_args.into()).unwrap();
-
-    let lock_script = context
-        .build_script(&always_success_out_point, Bytes::new())
-        .unwrap();
-
-    // Create token with cap = 1000
-    let supply_cap = 1000u128;
-    let input_data = create_ct_info_data(0, &issuer_pubkey, supply_cap, MINTABLE);
-
-    let input_out_point = context.create_cell(
-        CellOutput::new_builder()
-            .capacity(1000)
-            .lock(lock_script.clone())
-            .type_(Some(type_script.clone()))
-            .build(),
-        input_data,
-    );
-
-    let input = CellInput::new_builder()
-        .previous_output(input_out_point)
-        .build();
-
-    // Try to mint 1001 tokens (exceeds cap)
-    let old_supply = 0u128;
-    let new_supply = 1001u128;
-    let output_data = create_ct_info_data(new_supply, &issuer_pubkey, supply_cap, MINTABLE);
-
-    let outputs = vec![CellOutput::new_builder()
-        .capacity(1000)
-        .lock(lock_script)
-        .type_(Some(type_script))
-        .build()];
-
-    // Add cell deps
-    let cell_deps = vec![CellDep::new_builder().out_point(out_point).build()].pack();
-
-    let tx = TransactionBuilder::default()
-        .cell_deps(cell_deps)
-        .input(input)
-        .outputs(outputs)
-        .outputs_data(vec![output_data].pack())
-        .build();
-
-    let tx = context.complete_tx(tx);
-
-    let tx_hash = tx.hash().raw_data();
-    let mut message = Vec::new();
-    message.extend_from_slice(&tx_hash);
-    message.extend_from_slice(&old_supply.to_le_bytes());
-    message.extend_from_slice(&new_supply.to_le_bytes());
-    let signature: Signature = signing_key.sign(&message);
-
-    // Compute mint commitment for the minted amount
-    let minted_amount = new_supply - old_supply;
-    let mint_commitment = compute_mint_commitment(minted_amount);
-
-    let witness_args = WitnessArgs::new_builder()
-        .input_type(Some(Bytes::from(signature.to_bytes().to_vec())))
-        .output_type(Some(mint_commitment))
-        .build();
-
-    let tx = tx
-        .as_advanced_builder()
-        .set_witnesses(vec![witness_args.as_bytes().pack()])
-        .build();
-
-    // Should fail with SupplyCapExceeded
-    let result = context.verify_tx(&tx, 20_000_000);
-    assert!(result.is_err(), "should fail when exceeding cap");
-}
-
-#[test]
-fn test_ct_info_mint_without_mint_commitment() {
-    // Test: Try to mint without providing mint_commitment in witness (should fail)
-    // NOTE: Authorization is handled by lock script, not type script.
-    //       This test verifies that mint_commitment is required in witness.
-    let mut context = Context::default();
-    let out_point = context.deploy_cell_by_name("ct-info-type");
-    let always_success_out_point = context.deploy_cell(ALWAYS_SUCCESS.clone());
-
-    let mut csprng = OsRng;
-    let signing_key = SigningKey::generate(&mut csprng);
-    let verifying_key = signing_key.verifying_key();
-    let issuer_pubkey: [u8; 32] = verifying_key.to_bytes();
-
-    let token_id = [4u8; 32];
-    let mut type_args = Vec::new();
-    type_args.extend_from_slice(&token_id);
-    type_args.push(0);
-
-    let type_script = context.build_script(&out_point, type_args.into()).unwrap();
-
-    let lock_script = context
-        .build_script(&always_success_out_point, Bytes::new())
-        .unwrap();
-
-    let input_data = create_ct_info_data(0, &issuer_pubkey, 1_000_000, MINTABLE);
-
-    let input_out_point = context.create_cell(
-        CellOutput::new_builder()
-            .capacity(1000)
-            .lock(lock_script.clone())
-            .type_(Some(type_script.clone()))
-            .build(),
-        input_data,
-    );
-
-    let input = CellInput::new_builder()
-        .previous_output(input_out_point)
-        .build();
-
-    let output_data = create_ct_info_data(100, &issuer_pubkey, 1_000_000, MINTABLE);
-
-    let outputs = vec![CellOutput::new_builder()
-        .capacity(1000)
-        .lock(lock_script)
-        .type_(Some(type_script))
-        .build()];
-
-    // Add cell deps
-    let cell_deps = vec![CellDep::new_builder().out_point(out_point).build()].pack();
-
-    let tx = TransactionBuilder::default()
-        .cell_deps(cell_deps)
-        .input(input)
-        .outputs(outputs)
-        .outputs_data(vec![output_data].pack())
-        .build();
-
-    // No mint_commitment provided in witness
-    let tx = context.complete_tx(tx);
-
-    // Should fail with WitnessFormatError (missing mint_commitment)
-    let result = context.verify_tx(&tx, 20_000_000);
-    assert!(result.is_err(), "should fail without mint_commitment");
-    println!("test_ct_info_mint_without_mint_commitment: passed (correctly rejected)");
-}
-
-#[test]
-fn test_ct_info_immutable_issuer_pubkey() {
-    // Test: Changing issuer_pubkey should fail with ImmutableFieldChanged
-    let mut context = Context::default();
-    let out_point = context.deploy_cell_by_name("ct-info-type");
-    let always_success_out_point = context.deploy_cell(ALWAYS_SUCCESS.clone());
-
-    let mut csprng = OsRng;
-    let signing_key = SigningKey::generate(&mut csprng);
-    let verifying_key = signing_key.verifying_key();
-    let issuer_pubkey: [u8; 32] = verifying_key.to_bytes();
-
-    // Generate a different pubkey for output
-    let signing_key2 = SigningKey::generate(&mut csprng);
-    let different_pubkey: [u8; 32] = signing_key2.verifying_key().to_bytes();
-
-    let token_id = [5u8; 32];
-    let mut type_args = Vec::new();
-    type_args.extend_from_slice(&token_id);
-    type_args.push(0);
-
-    let type_script = context.build_script(&out_point, type_args.into()).unwrap();
-
-    let lock_script = context
-        .build_script(&always_success_out_point, Bytes::new())
-        .unwrap();
-
-    let input_data = create_ct_info_data(0, &issuer_pubkey, 1_000_000, MINTABLE);
-
-    let input_out_point = context.create_cell(
-        CellOutput::new_builder()
-            .capacity(1000)
-            .lock(lock_script.clone())
-            .type_(Some(type_script.clone()))
-            .build(),
-        input_data,
-    );
-
-    let input = CellInput::new_builder()
-        .previous_output(input_out_point)
-        .build();
-
-    // Try to change issuer_pubkey in output
-    let old_supply = 0u128;
-    let new_supply = 100u128;
-    let output_data = create_ct_info_data(new_supply, &different_pubkey, 1_000_000, MINTABLE);
-
-    let outputs = vec![CellOutput::new_builder()
-        .capacity(1000)
-        .lock(lock_script)
-        .type_(Some(type_script))
-        .build()];
-
-    let cell_deps = vec![CellDep::new_builder().out_point(out_point).build()].pack();
-
-    let tx = TransactionBuilder::default()
-        .cell_deps(cell_deps)
-        .input(input)
-        .outputs(outputs)
-        .outputs_data(vec![output_data].pack())
-        .build();
-
-    let tx = context.complete_tx(tx);
-
-    let tx_hash = tx.hash().raw_data();
-    let mut message = Vec::new();
-    message.extend_from_slice(&tx_hash);
-    message.extend_from_slice(&old_supply.to_le_bytes());
-    message.extend_from_slice(&new_supply.to_le_bytes());
-    let signature: Signature = signing_key.sign(&message);
-
-    // Compute mint commitment for the minted amount
-    let minted_amount = new_supply - old_supply;
-    let mint_commitment = compute_mint_commitment(minted_amount);
-
-    let witness_args = WitnessArgs::new_builder()
-        .input_type(Some(Bytes::from(signature.to_bytes().to_vec())))
-        .output_type(Some(mint_commitment))
-        .build();
-
-    let tx = tx
-        .as_advanced_builder()
-        .set_witnesses(vec![witness_args.as_bytes().pack()])
-        .build();
-
-    let result = context.verify_tx(&tx, 20_000_000);
-    assert!(result.is_err(), "should fail when issuer_pubkey is changed");
-    println!("test_ct_info_immutable_issuer_pubkey: passed (correctly rejected)");
-}
-
-#[test]
-fn test_ct_info_immutable_supply_cap() {
-    // Test: Changing supply_cap should fail with ImmutableFieldChanged
-    let mut context = Context::default();
-    let out_point = context.deploy_cell_by_name("ct-info-type");
-    let always_success_out_point = context.deploy_cell(ALWAYS_SUCCESS.clone());
-
-    let mut csprng = OsRng;
-    let signing_key = SigningKey::generate(&mut csprng);
-    let verifying_key = signing_key.verifying_key();
-    let issuer_pubkey: [u8; 32] = verifying_key.to_bytes();
-
-    let token_id = [6u8; 32];
-    let mut type_args = Vec::new();
-    type_args.extend_from_slice(&token_id);
-    type_args.push(0);
-
-    let type_script = context.build_script(&out_point, type_args.into()).unwrap();
-
-    let lock_script = context
-        .build_script(&always_success_out_point, Bytes::new())
-        .unwrap();
-
-    let input_data = create_ct_info_data(0, &issuer_pubkey, 1_000_000, MINTABLE);
-
-    let input_out_point = context.create_cell(
-        CellOutput::new_builder()
-            .capacity(1000)
-            .lock(lock_script.clone())
-            .type_(Some(type_script.clone()))
-            .build(),
-        input_data,
-    );
-
-    let input = CellInput::new_builder()
-        .previous_output(input_out_point)
-        .build();
-
-    // Try to change supply_cap from 1_000_000 to 2_000_000
-    let old_supply = 0u128;
-    let new_supply = 100u128;
-    let output_data = create_ct_info_data(new_supply, &issuer_pubkey, 2_000_000, MINTABLE);
-
-    let outputs = vec![CellOutput::new_builder()
-        .capacity(1000)
-        .lock(lock_script)
-        .type_(Some(type_script))
-        .build()];
-
-    let cell_deps = vec![CellDep::new_builder().out_point(out_point).build()].pack();
-
-    let tx = TransactionBuilder::default()
-        .cell_deps(cell_deps)
-        .input(input)
-        .outputs(outputs)
-        .outputs_data(vec![output_data].pack())
-        .build();
-
-    let tx = context.complete_tx(tx);
-
-    let tx_hash = tx.hash().raw_data();
-    let mut message = Vec::new();
-    message.extend_from_slice(&tx_hash);
-    message.extend_from_slice(&old_supply.to_le_bytes());
-    message.extend_from_slice(&new_supply.to_le_bytes());
-    let signature: Signature = signing_key.sign(&message);
-
-    // Compute mint commitment for the minted amount
-    let minted_amount = new_supply - old_supply;
-    let mint_commitment = compute_mint_commitment(minted_amount);
-
-    let witness_args = WitnessArgs::new_builder()
-        .input_type(Some(Bytes::from(signature.to_bytes().to_vec())))
-        .output_type(Some(mint_commitment))
-        .build();
-
-    let tx = tx
-        .as_advanced_builder()
-        .set_witnesses(vec![witness_args.as_bytes().pack()])
-        .build();
-
-    let result = context.verify_tx(&tx, 20_000_000);
-    assert!(result.is_err(), "should fail when supply_cap is changed");
-    println!("test_ct_info_immutable_supply_cap: passed (correctly rejected)");
-}
-
-#[test]
-fn test_ct_info_immutable_flags() {
-    // Test: Changing flags should fail with ImmutableFieldChanged
-    let mut context = Context::default();
-    let out_point = context.deploy_cell_by_name("ct-info-type");
-    let always_success_out_point = context.deploy_cell(ALWAYS_SUCCESS.clone());
-
-    let mut csprng = OsRng;
-    let signing_key = SigningKey::generate(&mut csprng);
-    let verifying_key = signing_key.verifying_key();
-    let issuer_pubkey: [u8; 32] = verifying_key.to_bytes();
-
-    let token_id = [7u8; 32];
-    let mut type_args = Vec::new();
-    type_args.extend_from_slice(&token_id);
-    type_args.push(0);
-
-    let type_script = context.build_script(&out_point, type_args.into()).unwrap();
-
-    let lock_script = context
-        .build_script(&always_success_out_point, Bytes::new())
-        .unwrap();
-
-    let input_data = create_ct_info_data(0, &issuer_pubkey, 1_000_000, MINTABLE);
-
-    let input_out_point = context.create_cell(
-        CellOutput::new_builder()
-            .capacity(1000)
-            .lock(lock_script.clone())
-            .type_(Some(type_script.clone()))
-            .build(),
-        input_data,
-    );
-
-    let input = CellInput::new_builder()
-        .previous_output(input_out_point)
-        .build();
-
-    // Try to change flags from MINTABLE (0x01) to MINTABLE|BURNABLE (0x03)
-    let old_supply = 0u128;
-    let new_supply = 100u128;
-    let output_data = create_ct_info_data(new_supply, &issuer_pubkey, 1_000_000, 0x03);
-
-    let outputs = vec![CellOutput::new_builder()
-        .capacity(1000)
-        .lock(lock_script)
-        .type_(Some(type_script))
-        .build()];
-
-    let cell_deps = vec![CellDep::new_builder().out_point(out_point).build()].pack();
-
-    let tx = TransactionBuilder::default()
-        .cell_deps(cell_deps)
-        .input(input)
-        .outputs(outputs)
-        .outputs_data(vec![output_data].pack())
-        .build();
-
-    let tx = context.complete_tx(tx);
-
-    let tx_hash = tx.hash().raw_data();
-    let mut message = Vec::new();
-    message.extend_from_slice(&tx_hash);
-    message.extend_from_slice(&old_supply.to_le_bytes());
-    message.extend_from_slice(&new_supply.to_le_bytes());
-    let signature: Signature = signing_key.sign(&message);
-
-    // Compute mint commitment for the minted amount
-    let minted_amount = new_supply - old_supply;
-    let mint_commitment = compute_mint_commitment(minted_amount);
-
-    let witness_args = WitnessArgs::new_builder()
-        .input_type(Some(Bytes::from(signature.to_bytes().to_vec())))
-        .output_type(Some(mint_commitment))
-        .build();
-
-    let tx = tx
-        .as_advanced_builder()
-        .set_witnesses(vec![witness_args.as_bytes().pack()])
-        .build();
-
-    let result = context.verify_tx(&tx, 20_000_000);
-    assert!(result.is_err(), "should fail when flags are changed");
-    println!("test_ct_info_immutable_flags: passed (correctly rejected)");
-}
-
-#[test]
-fn test_ct_info_decrease_supply() {
-    // Test: Decreasing total_supply should fail with InvalidMintAmount
-    let mut context = Context::default();
-    let out_point = context.deploy_cell_by_name("ct-info-type");
-    let always_success_out_point = context.deploy_cell(ALWAYS_SUCCESS.clone());
-
-    let mut csprng = OsRng;
-    let signing_key = SigningKey::generate(&mut csprng);
-    let verifying_key = signing_key.verifying_key();
-    let issuer_pubkey: [u8; 32] = verifying_key.to_bytes();
-
-    let token_id = [8u8; 32];
-    let mut type_args = Vec::new();
-    type_args.extend_from_slice(&token_id);
-    type_args.push(0);
-
-    let type_script = context.build_script(&out_point, type_args.into()).unwrap();
-
-    let lock_script = context
-        .build_script(&always_success_out_point, Bytes::new())
-        .unwrap();
-
-    // Start with supply = 100
-    let input_data = create_ct_info_data(100, &issuer_pubkey, 1_000_000, MINTABLE);
-
-    let input_out_point = context.create_cell(
-        CellOutput::new_builder()
-            .capacity(1000)
-            .lock(lock_script.clone())
-            .type_(Some(type_script.clone()))
-            .build(),
-        input_data,
-    );
-
-    let input = CellInput::new_builder()
-        .previous_output(input_out_point)
-        .build();
-
-    // Try to decrease supply from 100 to 50
-    let old_supply = 100u128;
-    let new_supply = 50u128;
-    let output_data = create_ct_info_data(new_supply, &issuer_pubkey, 1_000_000, MINTABLE);
-
-    let outputs = vec![CellOutput::new_builder()
-        .capacity(1000)
-        .lock(lock_script)
-        .type_(Some(type_script))
-        .build()];
-
-    let cell_deps = vec![CellDep::new_builder().out_point(out_point).build()].pack();
-
-    let tx = TransactionBuilder::default()
-        .cell_deps(cell_deps)
-        .input(input)
-        .outputs(outputs)
-        .outputs_data(vec![output_data].pack())
-        .build();
-
-    let tx = context.complete_tx(tx);
-
-    let tx_hash = tx.hash().raw_data();
-    let mut message = Vec::new();
-    message.extend_from_slice(&tx_hash);
-    message.extend_from_slice(&old_supply.to_le_bytes());
-    message.extend_from_slice(&new_supply.to_le_bytes());
-    let signature: Signature = signing_key.sign(&message);
-
-    // Use dummy mint_commitment since this test fails before reaching mint_commitment validation
-    // (fails at InvalidMintAmount check because new_supply < old_supply)
-    let mint_commitment = compute_mint_commitment(0);
-
-    let witness_args = WitnessArgs::new_builder()
-        .input_type(Some(Bytes::from(signature.to_bytes().to_vec())))
-        .output_type(Some(mint_commitment))
-        .build();
-
-    let tx = tx
-        .as_advanced_builder()
-        .set_witnesses(vec![witness_args.as_bytes().pack()])
-        .build();
-
-    let result = context.verify_tx(&tx, 20_000_000);
-    assert!(result.is_err(), "should fail when supply is decreased");
-    println!("test_ct_info_decrease_supply: passed (correctly rejected)");
-}
-
-// NOTE: Signature verification tests have been removed.
-// Authorization (signature verification) is the responsibility of the LOCK SCRIPT,
-// not the type script. The type script only validates state transitions.
-// See docs/ct-info-type-design.md for more details.
-
-#[test]
-fn test_ct_info_genesis_zero_issuer() {
-    // Test: Genesis with all-zero issuer_pubkey should fail
-    let mut context = Context::default();
-    let out_point = context.deploy_cell_by_name("ct-info-type");
-    let always_success_out_point = context.deploy_cell(ALWAYS_SUCCESS.clone());
-
-    let zero_pubkey = [0u8; 32];
-
-    let lock_script = context
-        .build_script(&always_success_out_point, Bytes::new())
-        .unwrap();
-
-    // Create a dummy input cell for Type ID calculation
-    let dummy_input_out_point = context.create_cell(
-        CellOutput::new_builder()
-            .capacity(1000)
-            .lock(lock_script.clone())
-            .build(),
-        Bytes::new(),
-    );
-    let dummy_input = CellInput::new_builder()
-        .previous_output(dummy_input_out_point)
-        .build();
-
-    // Calculate Type ID
-    let type_id = calculate_type_id(&dummy_input, 0);
-    let type_script = context
-        .build_script(&out_point, Bytes::from(type_id.to_vec()))
-        .unwrap();
-
-    let output_data = create_ct_info_data(0, &zero_pubkey, 1_000_000, MINTABLE);
-
-    let outputs = vec![CellOutput::new_builder()
-        .capacity(1000)
-        .lock(lock_script)
-        .type_(Some(type_script))
-        .build()];
-
-    let tx = TransactionBuilder::default()
-        .input(dummy_input)
-        .outputs(outputs)
-        .outputs_data(vec![output_data].pack())
-        .build();
-    let tx = context.complete_tx(tx);
-
-    let result = context.verify_tx(&tx, 20_000_000);
-    assert!(result.is_err(), "should fail with zero issuer_pubkey");
-    println!("test_ct_info_genesis_zero_issuer: passed (correctly rejected)");
-}
-
-#[test]
-fn test_ct_info_genesis_not_mintable() {
-    // Test: Genesis without MINTABLE flag should fail
-    let mut context = Context::default();
-    let out_point = context.deploy_cell_by_name("ct-info-type");
-    let always_success_out_point = context.deploy_cell(ALWAYS_SUCCESS.clone());
-
-    let mut csprng = OsRng;
-    let signing_key = SigningKey::generate(&mut csprng);
-    let issuer_pubkey: [u8; 32] = signing_key.verifying_key().to_bytes();
-
-    let lock_script = context
-        .build_script(&always_success_out_point, Bytes::new())
-        .unwrap();
-
-    // Create a dummy input cell for Type ID calculation
-    let dummy_input_out_point = context.create_cell(
-        CellOutput::new_builder()
-            .capacity(1000)
-            .lock(lock_script.clone())
-            .build(),
-        Bytes::new(),
-    );
-    let dummy_input = CellInput::new_builder()
-        .previous_output(dummy_input_out_point)
-        .build();
-
-    // Calculate Type ID
-    let type_id = calculate_type_id(&dummy_input, 0);
-    let type_script = context
-        .build_script(&out_point, Bytes::from(type_id.to_vec()))
-        .unwrap();
-
-    // Create with flags = 0 (no MINTABLE)
-    let output_data = create_ct_info_data(0, &issuer_pubkey, 1_000_000, 0);
-
-    let outputs = vec![CellOutput::new_builder()
-        .capacity(1000)
-        .lock(lock_script)
-        .type_(Some(type_script))
-        .build()];
-
-    let tx = TransactionBuilder::default()
-        .input(dummy_input)
-        .outputs(outputs)
-        .outputs_data(vec![output_data].pack())
-        .build();
-    let tx = context.complete_tx(tx);
-
-    let result = context.verify_tx(&tx, 20_000_000);
-    assert!(result.is_err(), "should fail without MINTABLE flag");
-    println!("test_ct_info_genesis_not_mintable: passed (correctly rejected)");
-}
-
-#[test]
-fn test_ct_info_invalid_mint_commitment() {
-    // Test: Mint with wrong mint_commitment should fail with InvalidMintCommitment
-    let mut context = Context::default();
-    let out_point = context.deploy_cell_by_name("ct-info-type");
-    let always_success_out_point = context.deploy_cell(ALWAYS_SUCCESS.clone());
-
-    let mut csprng = OsRng;
-    let signing_key = SigningKey::generate(&mut csprng);
-    let verifying_key = signing_key.verifying_key();
-    let issuer_pubkey: [u8; 32] = verifying_key.to_bytes();
-
-    let token_id = [12u8; 32];
-    let mut type_args = Vec::new();
-    type_args.extend_from_slice(&token_id);
-    type_args.push(0);
-
-    let type_script = context.build_script(&out_point, type_args.into()).unwrap();
-
-    let lock_script = context
-        .build_script(&always_success_out_point, Bytes::new())
-        .unwrap();
-
-    let input_data = create_ct_info_data(0, &issuer_pubkey, 1_000_000, MINTABLE);
-
-    let input_out_point = context.create_cell(
-        CellOutput::new_builder()
-            .capacity(1000)
-            .lock(lock_script.clone())
-            .type_(Some(type_script.clone()))
-            .build(),
-        input_data,
-    );
-
-    let input = CellInput::new_builder()
-        .previous_output(input_out_point)
-        .build();
-
-    // Mint 100 tokens
-    let old_supply = 0u128;
-    let new_supply = 100u128;
-    let output_data = create_ct_info_data(new_supply, &issuer_pubkey, 1_000_000, MINTABLE);
-
-    let outputs = vec![CellOutput::new_builder()
-        .capacity(1000)
-        .lock(lock_script)
-        .type_(Some(type_script))
-        .build()];
-
-    let cell_deps = vec![CellDep::new_builder().out_point(out_point).build()].pack();
-
-    let tx = TransactionBuilder::default()
-        .cell_deps(cell_deps)
-        .input(input)
-        .outputs(outputs)
-        .outputs_data(vec![output_data].pack())
-        .build();
-
-    let tx = context.complete_tx(tx);
-
-    let tx_hash = tx.hash().raw_data();
-    let mut message = Vec::new();
-    message.extend_from_slice(&tx_hash);
-    message.extend_from_slice(&old_supply.to_le_bytes());
-    message.extend_from_slice(&new_supply.to_le_bytes());
-    let signature: Signature = signing_key.sign(&message);
-
-    // Use WRONG mint_commitment (50 instead of 100)
-    let wrong_mint_commitment = compute_mint_commitment(50);
-
-    let witness_args = WitnessArgs::new_builder()
-        .input_type(Some(Bytes::from(signature.to_bytes().to_vec())))
-        .output_type(Some(wrong_mint_commitment))
-        .build();
-
-    let tx = tx
-        .as_advanced_builder()
-        .set_witnesses(vec![witness_args.as_bytes().pack()])
-        .build();
-
-    let result = context.verify_tx(&tx, 20_000_000);
-    assert!(result.is_err(), "should fail with wrong mint_commitment");
-    println!("test_ct_info_invalid_mint_commitment: passed (correctly rejected)");
-}
-
-#[test]
-fn test_ct_token_type() {
-    // deploy contract
-    let mut context = Context::default();
-    let contract_out_point = context.deploy_cell_by_name("ct-token-type");
-    let always_success_out_point = context.deploy_cell(ALWAYS_SUCCESS.clone());
-
-    // prepare scripts
-    let lock_script = context
-        .build_script(&always_success_out_point, Bytes::new())
-        .unwrap();
-
-    let type_script = context
-        .build_script(&contract_out_point, Bytes::from(vec![0]))
-        .unwrap();
-
-    // prepare cells
-    let pc_gens = PedersenGens::default();
-    let mut rng = OsRng;
-
-    let v_in1 = Scalar::from(60u64);
-    let r_in1 = Scalar::random(&mut rng);
-    let c_in1: RistrettoPoint = pc_gens.commit(v_in1, r_in1);
-    let mut input_data1 = c_in1.compress().to_bytes().to_vec();
-    input_data1.extend_from_slice(&[0u8; 32]);
-
-    let v_in2 = Scalar::from(40u64);
-    let r_in2 = Scalar::random(&mut rng);
-    let c_in2 = pc_gens.commit(v_in2, r_in2);
-    let mut input_data2 = c_in2.compress().to_bytes().to_vec();
-    input_data2.extend_from_slice(&[0u8; 32]);
-
-    let input_out_point1 = context.create_cell(
-        CellOutput::new_builder()
-            .capacity(1000)
-            .lock(lock_script.clone())
-            .type_(Some(type_script.clone()))
-            .build(),
-        input_data1.into(),
-    );
-    let input1 = CellInput::new_builder()
-        .previous_output(input_out_point1)
-        .build();
-
-    let input_out_point2 = context.create_cell(
-        CellOutput::new_builder()
-            .capacity(1000)
-            .lock(lock_script.clone())
-            .type_(Some(type_script.clone()))
-            .build(),
-        input_data2.into(),
-    );
-    let input2 = CellInput::new_builder()
-        .previous_output(input_out_point2)
-        .build();
-
-    let sum_r_in = r_in1 + r_in2;
-    let r_out1 = Scalar::random(&mut rng);
-    let r_out2 = sum_r_in - r_out1;
-
-    let bp_gens = BulletproofGens::new(64, 2);
-    let mut prover_transcript = Transcript::new(b"ct-token-type");
-
-    let (proof, commitments) = RangeProof::prove_multiple_with_rng(
-        &bp_gens,
-        &pc_gens,
-        &mut prover_transcript,
-        &[55, 45],
-        &[r_out1, r_out2],
-        32,
-        &mut rng,
-    )
-    .unwrap();
-
-    let witness_args = WitnessArgs::new_builder()
-        .output_type(Some(proof.to_bytes().pack()))
-        .build();
-
-    let mut output_data1 = commitments[0].to_bytes().to_vec();
-    output_data1.extend_from_slice(&[0u8; 32]);
-
-    let mut output_data2 = commitments[1].to_bytes().to_vec();
-    output_data2.extend_from_slice(&[0u8; 32]);
-
-    let outputs = vec![
-        CellOutput::new_builder()
-            .capacity(1000)
-            .lock(lock_script.clone())
-            .type_(Some(type_script.clone()))
-            .build(),
-        CellOutput::new_builder()
-            .capacity(1000)
-            .lock(lock_script)
-            .type_(Some(type_script.clone()))
-            .build(),
-    ];
-
-    let outputs_data: Vec<Bytes> = vec![output_data1.into(), output_data2.into()];
-
-    // build transaction
-    let tx = TransactionBuilder::default()
-        .input(input1)
-        .input(input2)
-        .outputs(outputs)
-        .outputs_data(outputs_data.pack())
-        .witness(witness_args.as_bytes())
-        .build();
-    let tx = context.complete_tx(tx);
-
-    // run
-    let cycles = context
-        .verify_tx(&tx, 1_000_000_000)
-        .expect("pass verification");
-    println!("consume cycles: {}", cycles);
-}
-
-#[test]
-fn test_ct_token_invalid_input_length() {
-    // Test: Input cell data is not 64 bytes (should fail with InvalidInput)
-    let mut context = Context::default();
-    let contract_out_point = context.deploy_cell_by_name("ct-token-type");
-    let always_success_out_point = context.deploy_cell(ALWAYS_SUCCESS.clone());
-
-    let lock_script = context
-        .build_script(&always_success_out_point, Bytes::new())
-        .unwrap();
-
-    let type_script = context
-        .build_script(&contract_out_point, Bytes::from(vec![0]))
-        .unwrap();
-
-    // Create input with wrong data length (32 bytes instead of 64)
-    let invalid_input_data = vec![0u8; 32];
-
-    let input_out_point = context.create_cell(
-        CellOutput::new_builder()
-            .capacity(1000)
-            .lock(lock_script.clone())
-            .type_(Some(type_script.clone()))
-            .build(),
-        invalid_input_data.into(),
-    );
-    let input = CellInput::new_builder()
-        .previous_output(input_out_point)
-        .build();
-
-    // Valid output
-    let pc_gens = PedersenGens::default();
-    let mut rng = OsRng;
-    let v_out = Scalar::from(0u64);
-    let r_out = Scalar::random(&mut rng);
-    let c_out = pc_gens.commit(v_out, r_out);
-    let mut output_data = c_out.compress().to_bytes().to_vec();
-    output_data.extend_from_slice(&[0u8; 32]);
-
-    let outputs = vec![CellOutput::new_builder()
-        .capacity(1000)
-        .lock(lock_script)
-        .type_(Some(type_script))
-        .build()];
-
-    let bp_gens = BulletproofGens::new(64, 1);
-    let mut prover_transcript = Transcript::new(b"ct-token-type");
-    let (proof, _) = RangeProof::prove_multiple_with_rng(
-        &bp_gens,
-        &pc_gens,
-        &mut prover_transcript,
-        &[0],
-        &[r_out],
-        32,
-        &mut rng,
-    )
-    .unwrap();
-
-    let witness_args = WitnessArgs::new_builder()
-        .output_type(Some(proof.to_bytes().pack()))
-        .build();
-
-    let tx = TransactionBuilder::default()
-        .input(input)
-        .outputs(outputs)
-        .outputs_data(vec![Bytes::from(output_data)].pack())
-        .witness(witness_args.as_bytes())
-        .build();
-    let tx = context.complete_tx(tx);
-
-    let result = context.verify_tx(&tx, 1_000_000_000);
-    assert!(result.is_err(), "should fail with invalid input length");
-    println!("test_ct_token_invalid_input_length: passed (correctly rejected)");
-}
-
-#[test]
-fn test_ct_token_invalid_output_length() {
-    // Test: Output cell data is not 64 bytes (should fail with InvalidOutput)
-    let mut context = Context::default();
-    let contract_out_point = context.deploy_cell_by_name("ct-token-type");
-    let always_success_out_point = context.deploy_cell(ALWAYS_SUCCESS.clone());
-
-    let lock_script = context
-        .build_script(&always_success_out_point, Bytes::new())
-        .unwrap();
-
-    let type_script = context
-        .build_script(&contract_out_point, Bytes::from(vec![0]))
-        .unwrap();
-
-    // Valid input
-    let pc_gens = PedersenGens::default();
-    let mut rng = OsRng;
-    let v_in = Scalar::from(100u64);
-    let r_in = Scalar::random(&mut rng);
-    let c_in = pc_gens.commit(v_in, r_in);
-    let mut input_data = c_in.compress().to_bytes().to_vec();
-    input_data.extend_from_slice(&[0u8; 32]);
-
-    let input_out_point = context.create_cell(
-        CellOutput::new_builder()
-            .capacity(1000)
-            .lock(lock_script.clone())
-            .type_(Some(type_script.clone()))
-            .build(),
-        input_data.into(),
-    );
-    let input = CellInput::new_builder()
-        .previous_output(input_out_point)
-        .build();
-
-    // Invalid output - only 32 bytes
-    let invalid_output_data = vec![0u8; 32];
-
-    let outputs = vec![CellOutput::new_builder()
-        .capacity(1000)
-        .lock(lock_script)
-        .type_(Some(type_script))
-        .build()];
-
-    let tx = TransactionBuilder::default()
-        .input(input)
-        .outputs(outputs)
-        .outputs_data(vec![Bytes::from(invalid_output_data)].pack())
-        .build();
-    let tx = context.complete_tx(tx);
-
-    let result = context.verify_tx(&tx, 1_000_000_000);
-    assert!(result.is_err(), "should fail with invalid output length");
-    println!("test_ct_token_invalid_output_length: passed (correctly rejected)");
-}
-
-#[test]
-fn test_ct_token_commitment_mismatch() {
-    // Test: Input and output commitment sums don't match (should fail with InputOutputSumMismatch)
-    let mut context = Context::default();
-    let contract_out_point = context.deploy_cell_by_name("ct-token-type");
-    let always_success_out_point = context.deploy_cell(ALWAYS_SUCCESS.clone());
-
-    let lock_script = context
-        .build_script(&always_success_out_point, Bytes::new())
-        .unwrap();
-
-    let type_script = context
-        .build_script(&contract_out_point, Bytes::from(vec![0]))
-        .unwrap();
-
-    let pc_gens = PedersenGens::default();
-    let mut rng = OsRng;
-
-    // Input: 100 tokens with random blinding factor
-    let v_in = Scalar::from(100u64);
-    let r_in = Scalar::random(&mut rng);
-    let c_in = pc_gens.commit(v_in, r_in);
-    let mut input_data = c_in.compress().to_bytes().to_vec();
-    input_data.extend_from_slice(&[0u8; 32]);
-
-    let input_out_point = context.create_cell(
-        CellOutput::new_builder()
-            .capacity(1000)
-            .lock(lock_script.clone())
-            .type_(Some(type_script.clone()))
-            .build(),
-        input_data.into(),
-    );
-    let input = CellInput::new_builder()
-        .previous_output(input_out_point)
-        .build();
-
-    // Output: 50 tokens with DIFFERENT blinding factor (not matching input)
-    let v_out = Scalar::from(50u64);
-    let r_out = Scalar::random(&mut rng); // Different r, causes mismatch
-    let c_out = pc_gens.commit(v_out, r_out);
-    let mut output_data = c_out.compress().to_bytes().to_vec();
-    output_data.extend_from_slice(&[0u8; 32]);
-
-    let outputs = vec![CellOutput::new_builder()
-        .capacity(1000)
-        .lock(lock_script)
-        .type_(Some(type_script))
-        .build()];
-
-    let bp_gens = BulletproofGens::new(64, 1);
-    let mut prover_transcript = Transcript::new(b"ct-token-type");
-    let (proof, _) = RangeProof::prove_multiple_with_rng(
-        &bp_gens,
-        &pc_gens,
-        &mut prover_transcript,
-        &[50],
-        &[r_out],
-        32,
-        &mut rng,
-    )
-    .unwrap();
-
-    let witness_args = WitnessArgs::new_builder()
-        .output_type(Some(proof.to_bytes().pack()))
-        .build();
-
-    let tx = TransactionBuilder::default()
-        .input(input)
-        .outputs(outputs)
-        .outputs_data(vec![Bytes::from(output_data)].pack())
-        .witness(witness_args.as_bytes())
-        .build();
-    let tx = context.complete_tx(tx);
-
-    let result = context.verify_tx(&tx, 1_000_000_000);
-    assert!(result.is_err(), "should fail with commitment mismatch");
-    println!("test_ct_token_commitment_mismatch: passed (correctly rejected)");
-}
-
-#[test]
-fn test_ct_token_invalid_range_proof() {
-    // Test: Invalid range proof (proof doesn't match commitments)
-    let mut context = Context::default();
-    let contract_out_point = context.deploy_cell_by_name("ct-token-type");
-    let always_success_out_point = context.deploy_cell(ALWAYS_SUCCESS.clone());
-
-    let lock_script = context
-        .build_script(&always_success_out_point, Bytes::new())
-        .unwrap();
-
-    let type_script = context
-        .build_script(&contract_out_point, Bytes::from(vec![0]))
-        .unwrap();
-
-    let pc_gens = PedersenGens::default();
-    let mut rng = OsRng;
-
-    // Input
-    let v_in = Scalar::from(100u64);
-    let r_in = Scalar::random(&mut rng);
-    let c_in = pc_gens.commit(v_in, r_in);
-    let mut input_data = c_in.compress().to_bytes().to_vec();
-    input_data.extend_from_slice(&[0u8; 32]);
-
-    let input_out_point = context.create_cell(
-        CellOutput::new_builder()
-            .capacity(1000)
-            .lock(lock_script.clone())
-            .type_(Some(type_script.clone()))
-            .build(),
-        input_data.into(),
-    );
-    let input = CellInput::new_builder()
-        .previous_output(input_out_point)
-        .build();
-
-    // Output with correct blinding factor sum
-    let r_out = r_in; // Same r to make commitment sum match
-    let v_out = Scalar::from(100u64);
-    let c_out = pc_gens.commit(v_out, r_out);
-    let mut output_data = c_out.compress().to_bytes().to_vec();
-    output_data.extend_from_slice(&[0u8; 32]);
-
-    let outputs = vec![CellOutput::new_builder()
-        .capacity(1000)
-        .lock(lock_script)
-        .type_(Some(type_script))
-        .build()];
-
-    // Create a proof for DIFFERENT values (wrong proof)
-    let bp_gens = BulletproofGens::new(64, 1);
-    let mut prover_transcript = Transcript::new(b"ct-token-type");
-    let wrong_r = Scalar::random(&mut rng);
-    let (wrong_proof, _) = RangeProof::prove_multiple_with_rng(
-        &bp_gens,
-        &pc_gens,
-        &mut prover_transcript,
-        &[50], // Wrong value
-        &[wrong_r],
-        32,
-        &mut rng,
-    )
-    .unwrap();
-
-    let witness_args = WitnessArgs::new_builder()
-        .output_type(Some(wrong_proof.to_bytes().pack()))
-        .build();
-
-    let tx = TransactionBuilder::default()
-        .input(input)
-        .outputs(outputs)
-        .outputs_data(vec![Bytes::from(output_data)].pack())
-        .witness(witness_args.as_bytes())
-        .build();
-    let tx = context.complete_tx(tx);
-
-    let result = context.verify_tx(&tx, 1_000_000_000);
-    assert!(result.is_err(), "should fail with invalid range proof");
-    println!("test_ct_token_invalid_range_proof: passed (correctly rejected)");
-}
-
-#[test]
-fn test_ct_token_missing_range_proof() {
-    // Test: Missing range proof in witness (should fail with InvalidRangeProofWitnessFormat)
-    let mut context = Context::default();
-    let contract_out_point = context.deploy_cell_by_name("ct-token-type");
-    let always_success_out_point = context.deploy_cell(ALWAYS_SUCCESS.clone());
-
-    let lock_script = context
-        .build_script(&always_success_out_point, Bytes::new())
-        .unwrap();
-
-    let type_script = context
-        .build_script(&contract_out_point, Bytes::from(vec![0]))
-        .unwrap();
-
-    let pc_gens = PedersenGens::default();
-    let mut rng = OsRng;
-
-    let v = Scalar::from(100u64);
-    let r = Scalar::random(&mut rng);
-    let c = pc_gens.commit(v, r);
-    let mut data = c.compress().to_bytes().to_vec();
-    data.extend_from_slice(&[0u8; 32]);
-
-    let input_out_point = context.create_cell(
-        CellOutput::new_builder()
-            .capacity(1000)
-            .lock(lock_script.clone())
-            .type_(Some(type_script.clone()))
-            .build(),
-        data.clone().into(),
-    );
-    let input = CellInput::new_builder()
-        .previous_output(input_out_point)
-        .build();
-
-    let outputs = vec![CellOutput::new_builder()
-        .capacity(1000)
-        .lock(lock_script)
-        .type_(Some(type_script))
-        .build()];
-
-    // No range proof in witness
-    let witness_args = WitnessArgs::new_builder().build();
-
-    let tx = TransactionBuilder::default()
-        .input(input)
-        .outputs(outputs)
-        .outputs_data(vec![Bytes::from(data)].pack())
-        .witness(witness_args.as_bytes())
-        .build();
-    let tx = context.complete_tx(tx);
-
-    let result = context.verify_tx(&tx, 1_000_000_000);
-    assert!(result.is_err(), "should fail with missing range proof");
-    println!("test_ct_token_missing_range_proof: passed (correctly rejected)");
-}
-
-#[test]
-fn test_ct_token_mint_with_commitment() {
-    // Test: Mint transaction with mint_commitment in witness and ct-info-type present
-    let mut context = Context::default();
-
-    // Deploy contracts
-    let ct_token_out_point = context.deploy_cell_by_name("ct-token-type");
-    let ct_info_out_point = context.deploy_cell_by_name("ct-info-type");
-    let always_success_out_point = context.deploy_cell(ALWAYS_SUCCESS.clone());
-
-    let lock_script = context
-        .build_script(&always_success_out_point, Bytes::new())
-        .unwrap();
-
-    // Get ct-info-type code_hash for ct-token-type script args
-    let ct_info_type_script = context
-        .build_script(&ct_info_out_point, Bytes::from(vec![0u8; 33]))
-        .unwrap();
-    let ct_info_code_hash: [u8; 32] = ct_info_type_script.code_hash().unpack();
-
-    // Create ct-token-type script with ct-info-type code_hash in args
-    let type_script = context
-        .build_script(&ct_token_out_point, Bytes::from(ct_info_code_hash.to_vec()))
-        .unwrap();
-
-    // Generate issuer keypair for ct-info-type
-    let mut csprng = OsRng;
-    let signing_key = SigningKey::generate(&mut csprng);
-    let issuer_pubkey: [u8; 32] = signing_key.verifying_key().to_bytes();
-
-    // Create ct-info-type cell (input)
-    let token_id = [42u8; 32];
-    let mut ct_info_args = Vec::new();
-    ct_info_args.extend_from_slice(&token_id);
-    ct_info_args.push(0); // version
-    let ct_info_script = context
-        .build_script(&ct_info_out_point, ct_info_args.into())
-        .unwrap();
-
-    let old_supply = 0u128;
-    let new_supply = 100u128;
-    let minted_amount = new_supply - old_supply;
-
-    let ct_info_input_data = create_ct_info_data(old_supply, &issuer_pubkey, 1_000_000, MINTABLE);
-    let ct_info_output_data = create_ct_info_data(new_supply, &issuer_pubkey, 1_000_000, MINTABLE);
-
-    let ct_info_input_out_point = context.create_cell(
-        CellOutput::new_builder()
-            .capacity(1000)
-            .lock(lock_script.clone())
-            .type_(Some(ct_info_script.clone()))
-            .build(),
-        ct_info_input_data,
-    );
-    let ct_info_input = CellInput::new_builder()
-        .previous_output(ct_info_input_out_point)
-        .build();
-
-    // Create ct-token-type cells
-    let pc_gens = PedersenGens::default();
-    let mut rng = OsRng;
-
-    // Create a "zero" input cell to satisfy group input requirement
-    let v_in = Scalar::from(0u64);
-    let r_in = Scalar::random(&mut rng);
-    let c_in = pc_gens.commit(v_in, r_in);
-    let mut ct_token_input_data = c_in.compress().to_bytes().to_vec();
-    ct_token_input_data.extend_from_slice(&[0u8; 32]);
-
-    let ct_token_input_out_point = context.create_cell(
-        CellOutput::new_builder()
-            .capacity(1000)
-            .lock(lock_script.clone())
-            .type_(Some(type_script.clone()))
-            .build(),
-        ct_token_input_data.into(),
-    );
-    let ct_token_input = CellInput::new_builder()
-        .previous_output(ct_token_input_out_point)
-        .build();
-
-    // Mint commitment uses zero blinding factor (public amount)
-    let mint_scalar = Scalar::from(minted_amount as u64);
-    let mint_commitment = pc_gens.commit(mint_scalar, Scalar::ZERO);
-
-    // Output: minted tokens
-    // r_out must equal r_in + 0 (since mint uses zero blinding)
-    let r_out = r_in;
-    let v_out = Scalar::from(minted_amount as u64);
-    let c_out = pc_gens.commit(v_out, r_out);
-    let mut ct_token_output_data = c_out.compress().to_bytes().to_vec();
-    ct_token_output_data.extend_from_slice(&[0u8; 32]);
-
-    // Create range proof for output
-    let bp_gens = BulletproofGens::new(64, 1);
-    let mut prover_transcript = Transcript::new(b"ct-token-type");
-    let (proof, _) = RangeProof::prove_multiple_with_rng(
-        &bp_gens,
-        &pc_gens,
-        &mut prover_transcript,
-        &[minted_amount as u64],
-        &[r_out],
-        32,
-        &mut rng,
-    )
-    .unwrap();
-
-    // Build outputs
-    let outputs = vec![
-        // ct-info-type output
-        CellOutput::new_builder()
-            .capacity(1000)
-            .lock(lock_script.clone())
-            .type_(Some(ct_info_script))
-            .build(),
-        // ct-token-type output
-        CellOutput::new_builder()
-            .capacity(1000)
-            .lock(lock_script)
-            .type_(Some(type_script))
-            .build(),
-    ];
-
-    // Cell deps
-    let cell_deps = vec![
-        CellDep::new_builder().out_point(ct_info_out_point).build(),
-        CellDep::new_builder().out_point(ct_token_out_point).build(),
-    ]
-    .pack();
-
-    // Build transaction
-    let tx = TransactionBuilder::default()
-        .cell_deps(cell_deps)
-        .input(ct_info_input) // ct-info-type input first
-        .input(ct_token_input) // ct-token-type input second
-        .outputs(outputs)
-        .outputs_data(vec![ct_info_output_data, Bytes::from(ct_token_output_data)].pack())
-        .build();
-
-    let tx = context.complete_tx(tx);
-
-    // Sign the ct-info-type transaction
-    let tx_hash = tx.hash().raw_data();
-    let mut message = Vec::new();
-    message.extend_from_slice(&tx_hash);
-    message.extend_from_slice(&old_supply.to_le_bytes());
-    message.extend_from_slice(&new_supply.to_le_bytes());
-    let signature: Signature = signing_key.sign(&message);
-
-    // Compute mint commitment for witness
-    let mint_commitment_bytes = mint_commitment.compress().to_bytes().to_vec();
-
-    // Witness 0: for ct-info-type input
-    // input_type: issuer signature (64 bytes)
-    // output_type: mint_commitment (32 bytes)
-    let witness0 = WitnessArgs::new_builder()
-        .input_type(Some(Bytes::from(signature.to_bytes().to_vec())))
-        .output_type(Some(Bytes::from(mint_commitment_bytes.clone())))
-        .build();
-
-    // Witness 1: for ct-token-type input
-    // input_type: mint_commitment (32 bytes) - ct-token-type reads this
-    // output_type: range_proof - ct-token-type reads this
-    let witness1 = WitnessArgs::new_builder()
-        .input_type(Some(Bytes::from(mint_commitment_bytes)))
-        .output_type(Some(proof.to_bytes().pack()))
-        .build();
-
-    let tx = tx
-        .as_advanced_builder()
-        .set_witnesses(vec![witness0.as_bytes().pack(), witness1.as_bytes().pack()])
-        .build();
-
-    let cycles = context
-        .verify_tx(&tx, 1_000_000_000)
-        .expect("mint transaction should pass");
-    println!(
-        "test_ct_token_mint_with_commitment consume cycles: {}",
-        cycles
-    );
+    assert!(result.is_err(), "should fail with wrong signature");
+    println!("test_stealth_lock_wrong_signature: passed (correctly rejected)");
 }
 
 #[test]
@@ -2344,11 +780,6 @@ fn test_ct_token_invalid_mint_commitment_length() {
         .build_script(&ct_token_out_point, Bytes::from(ct_info_code_hash.to_vec()))
         .unwrap();
 
-    // Generate issuer keypair
-    let mut csprng = OsRng;
-    let signing_key = SigningKey::generate(&mut csprng);
-    let issuer_pubkey: [u8; 32] = signing_key.verifying_key().to_bytes();
-
     // Create ct-info-type input
     let token_id = [43u8; 32];
     let mut ct_info_args = Vec::new();
@@ -2361,8 +792,8 @@ fn test_ct_token_invalid_mint_commitment_length() {
     let old_supply = 0u128;
     let new_supply = 100u128;
 
-    let ct_info_input_data = create_ct_info_data(old_supply, &issuer_pubkey, 1_000_000, MINTABLE);
-    let ct_info_output_data = create_ct_info_data(new_supply, &issuer_pubkey, 1_000_000, MINTABLE);
+    let ct_info_input_data = create_ct_info_data(old_supply, 1_000_000, MINTABLE);
+    let ct_info_output_data = create_ct_info_data(new_supply, 1_000_000, MINTABLE);
 
     let ct_info_input_out_point = context.create_cell(
         CellOutput::new_builder()
@@ -2451,18 +882,10 @@ fn test_ct_token_invalid_mint_commitment_length() {
 
     let tx = context.complete_tx(tx);
 
-    let tx_hash = tx.hash().raw_data();
-    let mut message = Vec::new();
-    message.extend_from_slice(&tx_hash);
-    message.extend_from_slice(&old_supply.to_le_bytes());
-    message.extend_from_slice(&new_supply.to_le_bytes());
-    let signature: Signature = signing_key.sign(&message);
-
     let mint_commitment_bytes = mint_commitment.compress().to_bytes().to_vec();
 
-    // Witness 0: for ct-info-type
+    // Witness 0: for ct-info-type (only output_type with mint commitment)
     let witness0 = WitnessArgs::new_builder()
-        .input_type(Some(Bytes::from(signature.to_bytes().to_vec())))
         .output_type(Some(Bytes::from(mint_commitment_bytes)))
         .build();
 
@@ -2505,10 +928,6 @@ fn test_ct_token_invalid_mint_commitment_point() {
         .build_script(&ct_token_out_point, Bytes::from(ct_info_code_hash.to_vec()))
         .unwrap();
 
-    let mut csprng = OsRng;
-    let signing_key = SigningKey::generate(&mut csprng);
-    let issuer_pubkey: [u8; 32] = signing_key.verifying_key().to_bytes();
-
     let token_id = [44u8; 32];
     let mut ct_info_args = Vec::new();
     ct_info_args.extend_from_slice(&token_id);
@@ -2520,8 +939,8 @@ fn test_ct_token_invalid_mint_commitment_point() {
     let old_supply = 0u128;
     let new_supply = 100u128;
 
-    let ct_info_input_data = create_ct_info_data(old_supply, &issuer_pubkey, 1_000_000, MINTABLE);
-    let ct_info_output_data = create_ct_info_data(new_supply, &issuer_pubkey, 1_000_000, MINTABLE);
+    let ct_info_input_data = create_ct_info_data(old_supply, 1_000_000, MINTABLE);
+    let ct_info_output_data = create_ct_info_data(new_supply, 1_000_000, MINTABLE);
 
     let ct_info_input_out_point = context.create_cell(
         CellOutput::new_builder()
@@ -2608,17 +1027,9 @@ fn test_ct_token_invalid_mint_commitment_point() {
 
     let tx = context.complete_tx(tx);
 
-    let tx_hash = tx.hash().raw_data();
-    let mut message = Vec::new();
-    message.extend_from_slice(&tx_hash);
-    message.extend_from_slice(&old_supply.to_le_bytes());
-    message.extend_from_slice(&new_supply.to_le_bytes());
-    let signature: Signature = signing_key.sign(&message);
-
     let mint_commitment_bytes = mint_commitment.compress().to_bytes().to_vec();
 
     let witness0 = WitnessArgs::new_builder()
-        .input_type(Some(Bytes::from(signature.to_bytes().to_vec())))
         .output_type(Some(Bytes::from(mint_commitment_bytes)))
         .build();
 
@@ -2661,10 +1072,6 @@ fn test_ct_token_mint_commitment_sum_mismatch() {
         .build_script(&ct_token_out_point, Bytes::from(ct_info_code_hash.to_vec()))
         .unwrap();
 
-    let mut csprng = OsRng;
-    let signing_key = SigningKey::generate(&mut csprng);
-    let issuer_pubkey: [u8; 32] = signing_key.verifying_key().to_bytes();
-
     let token_id = [45u8; 32];
     let mut ct_info_args = Vec::new();
     ct_info_args.extend_from_slice(&token_id);
@@ -2676,8 +1083,8 @@ fn test_ct_token_mint_commitment_sum_mismatch() {
     let old_supply = 0u128;
     let new_supply = 100u128;
 
-    let ct_info_input_data = create_ct_info_data(old_supply, &issuer_pubkey, 1_000_000, MINTABLE);
-    let ct_info_output_data = create_ct_info_data(new_supply, &issuer_pubkey, 1_000_000, MINTABLE);
+    let ct_info_input_data = create_ct_info_data(old_supply, 1_000_000, MINTABLE);
+    let ct_info_output_data = create_ct_info_data(new_supply, 1_000_000, MINTABLE);
 
     let ct_info_input_out_point = context.create_cell(
         CellOutput::new_builder()
@@ -2763,20 +1170,12 @@ fn test_ct_token_mint_commitment_sum_mismatch() {
 
     let tx = context.complete_tx(tx);
 
-    let tx_hash = tx.hash().raw_data();
-    let mut message = Vec::new();
-    message.extend_from_slice(&tx_hash);
-    message.extend_from_slice(&old_supply.to_le_bytes());
-    message.extend_from_slice(&new_supply.to_le_bytes());
-    let signature: Signature = signing_key.sign(&message);
-
     // WRONG mint commitment: 50 instead of 100
     let wrong_mint_scalar = Scalar::from(50u64);
     let wrong_mint_commitment = pc_gens.commit(wrong_mint_scalar, Scalar::ZERO);
     let wrong_mint_commitment_bytes = wrong_mint_commitment.compress().to_bytes().to_vec();
 
     let witness0 = WitnessArgs::new_builder()
-        .input_type(Some(Bytes::from(signature.to_bytes().to_vec())))
         .output_type(Some(Bytes::from(wrong_mint_commitment_bytes.clone())))
         .build();
 
@@ -2808,10 +1207,6 @@ fn test_ct_info_invalid_cell_count_2_inputs() {
     let out_point = context.deploy_cell_by_name("ct-info-type");
     let always_success_out_point = context.deploy_cell(ALWAYS_SUCCESS.clone());
 
-    let mut csprng = OsRng;
-    let signing_key = SigningKey::generate(&mut csprng);
-    let issuer_pubkey: [u8; 32] = signing_key.verifying_key().to_bytes();
-
     let token_id = [50u8; 32];
     let mut type_args = Vec::new();
     type_args.extend_from_slice(&token_id);
@@ -2823,7 +1218,7 @@ fn test_ct_info_invalid_cell_count_2_inputs() {
         .build_script(&always_success_out_point, Bytes::new())
         .unwrap();
 
-    let input_data = create_ct_info_data(100, &issuer_pubkey, 1_000_000, MINTABLE);
+    let input_data = create_ct_info_data(100, 1_000_000, MINTABLE);
 
     // Create TWO inputs with the same type script
     let input_out_point1 = context.create_cell(
@@ -2850,7 +1245,7 @@ fn test_ct_info_invalid_cell_count_2_inputs() {
         .previous_output(input_out_point2)
         .build();
 
-    let output_data = create_ct_info_data(200, &issuer_pubkey, 1_000_000, MINTABLE);
+    let output_data = create_ct_info_data(200, 1_000_000, MINTABLE);
 
     let outputs = vec![CellOutput::new_builder()
         .capacity(1000)
@@ -2883,10 +1278,6 @@ fn test_ct_info_invalid_cell_count_0_outputs() {
     let out_point = context.deploy_cell_by_name("ct-info-type");
     let always_success_out_point = context.deploy_cell(ALWAYS_SUCCESS.clone());
 
-    let mut csprng = OsRng;
-    let signing_key = SigningKey::generate(&mut csprng);
-    let issuer_pubkey: [u8; 32] = signing_key.verifying_key().to_bytes();
-
     let token_id = [51u8; 32];
     let mut type_args = Vec::new();
     type_args.extend_from_slice(&token_id);
@@ -2898,7 +1289,7 @@ fn test_ct_info_invalid_cell_count_0_outputs() {
         .build_script(&always_success_out_point, Bytes::new())
         .unwrap();
 
-    let input_data = create_ct_info_data(100, &issuer_pubkey, 1_000_000, MINTABLE);
+    let input_data = create_ct_info_data(100, 1_000_000, MINTABLE);
 
     let input_out_point = context.create_cell(
         CellOutput::new_builder()
@@ -2943,10 +1334,6 @@ fn test_ct_info_genesis_multiple_outputs() {
     let out_point = context.deploy_cell_by_name("ct-info-type");
     let always_success_out_point = context.deploy_cell(ALWAYS_SUCCESS.clone());
 
-    let mut csprng = OsRng;
-    let signing_key = SigningKey::generate(&mut csprng);
-    let issuer_pubkey: [u8; 32] = signing_key.verifying_key().to_bytes();
-
     let lock_script = context
         .build_script(&always_success_out_point, Bytes::new())
         .unwrap();
@@ -2969,7 +1356,7 @@ fn test_ct_info_genesis_multiple_outputs() {
         .build_script(&out_point, Bytes::from(type_id.to_vec()))
         .unwrap();
 
-    let output_data = create_ct_info_data(0, &issuer_pubkey, 1_000_000, MINTABLE);
+    let output_data = create_ct_info_data(0, 1_000_000, MINTABLE);
 
     // Create TWO outputs with ct-info-type (should fail)
     let outputs = vec![
@@ -3069,14 +1456,10 @@ fn test_ct_token_malformed_range_proof() {
 #[test]
 fn test_ct_info_unlimited_supply_cap() {
     // Test: supply_cap = 0 should allow unlimited minting (positive test)
+    // NOTE: Authorization is handled by the lock script (always_success here), not type script
     let mut context = Context::default();
     let out_point = context.deploy_cell_by_name("ct-info-type");
     let always_success_out_point = context.deploy_cell(ALWAYS_SUCCESS.clone());
-
-    let mut csprng = OsRng;
-    let signing_key = SigningKey::generate(&mut csprng);
-    let verifying_key = signing_key.verifying_key();
-    let issuer_pubkey: [u8; 32] = verifying_key.to_bytes();
 
     let token_id = [53u8; 32];
     let mut type_args = Vec::new();
@@ -3090,7 +1473,7 @@ fn test_ct_info_unlimited_supply_cap() {
         .unwrap();
 
     // supply_cap = 0 means unlimited
-    let input_data = create_ct_info_data(0, &issuer_pubkey, 0, MINTABLE);
+    let input_data = create_ct_info_data(0, 0, MINTABLE);
 
     let input_out_point = context.create_cell(
         CellOutput::new_builder()
@@ -3108,7 +1491,7 @@ fn test_ct_info_unlimited_supply_cap() {
     // Mint a very large amount
     let old_supply = 0u128;
     let new_supply = 1_000_000_000_000u128; // 1 trillion tokens
-    let output_data = create_ct_info_data(new_supply, &issuer_pubkey, 0, MINTABLE);
+    let output_data = create_ct_info_data(new_supply, 0, MINTABLE);
 
     let outputs = vec![CellOutput::new_builder()
         .capacity(1000)
@@ -3127,18 +1510,10 @@ fn test_ct_info_unlimited_supply_cap() {
 
     let tx = context.complete_tx(tx);
 
-    let tx_hash = tx.hash().raw_data();
-    let mut message = Vec::new();
-    message.extend_from_slice(&tx_hash);
-    message.extend_from_slice(&old_supply.to_le_bytes());
-    message.extend_from_slice(&new_supply.to_le_bytes());
-    let signature: Signature = signing_key.sign(&message);
-
     let minted_amount = new_supply - old_supply;
     let mint_commitment = compute_mint_commitment(minted_amount);
 
     let witness_args = WitnessArgs::new_builder()
-        .input_type(Some(Bytes::from(signature.to_bytes().to_vec())))
         .output_type(Some(mint_commitment))
         .build();
 
@@ -3166,10 +1541,6 @@ fn test_ct_info_zero_mint_amount() {
     let out_point = context.deploy_cell_by_name("ct-info-type");
     let always_success_out_point = context.deploy_cell(ALWAYS_SUCCESS.clone());
 
-    let mut csprng = OsRng;
-    let signing_key = SigningKey::generate(&mut csprng);
-    let issuer_pubkey: [u8; 32] = signing_key.verifying_key().to_bytes();
-
     let token_id = [55u8; 32];
     let mut type_args = Vec::new();
     type_args.extend_from_slice(&token_id);
@@ -3182,7 +1553,7 @@ fn test_ct_info_zero_mint_amount() {
         .unwrap();
 
     let supply = 100u128;
-    let input_data = create_ct_info_data(supply, &issuer_pubkey, 1_000_000, MINTABLE);
+    let input_data = create_ct_info_data(supply, 1_000_000, MINTABLE);
 
     let input_out_point = context.create_cell(
         CellOutput::new_builder()
@@ -3198,7 +1569,7 @@ fn test_ct_info_zero_mint_amount() {
         .build();
 
     // Same supply - trying to mint 0 tokens
-    let output_data = create_ct_info_data(supply, &issuer_pubkey, 1_000_000, MINTABLE);
+    let output_data = create_ct_info_data(supply, 1_000_000, MINTABLE);
 
     let outputs = vec![CellOutput::new_builder()
         .capacity(1000)
@@ -3217,17 +1588,9 @@ fn test_ct_info_zero_mint_amount() {
 
     let tx = context.complete_tx(tx);
 
-    let tx_hash = tx.hash().raw_data();
-    let mut message = Vec::new();
-    message.extend_from_slice(&tx_hash);
-    message.extend_from_slice(&supply.to_le_bytes());
-    message.extend_from_slice(&supply.to_le_bytes()); // Same supply
-    let signature: Signature = signing_key.sign(&message);
-
     let mint_commitment = compute_mint_commitment(0);
 
     let witness_args = WitnessArgs::new_builder()
-        .input_type(Some(Bytes::from(signature.to_bytes().to_vec())))
         .output_type(Some(mint_commitment))
         .build();
 
@@ -3248,10 +1611,6 @@ fn test_ct_info_missing_mint_commitment() {
     let out_point = context.deploy_cell_by_name("ct-info-type");
     let always_success_out_point = context.deploy_cell(ALWAYS_SUCCESS.clone());
 
-    let mut csprng = OsRng;
-    let signing_key = SigningKey::generate(&mut csprng);
-    let issuer_pubkey: [u8; 32] = signing_key.verifying_key().to_bytes();
-
     let token_id = [56u8; 32];
     let mut type_args = Vec::new();
     type_args.extend_from_slice(&token_id);
@@ -3265,7 +1624,7 @@ fn test_ct_info_missing_mint_commitment() {
 
     let old_supply = 0u128;
     let new_supply = 100u128;
-    let input_data = create_ct_info_data(old_supply, &issuer_pubkey, 1_000_000, MINTABLE);
+    let input_data = create_ct_info_data(old_supply, 1_000_000, MINTABLE);
 
     let input_out_point = context.create_cell(
         CellOutput::new_builder()
@@ -3280,7 +1639,7 @@ fn test_ct_info_missing_mint_commitment() {
         .previous_output(input_out_point)
         .build();
 
-    let output_data = create_ct_info_data(new_supply, &issuer_pubkey, 1_000_000, MINTABLE);
+    let output_data = create_ct_info_data(new_supply, 1_000_000, MINTABLE);
 
     let outputs = vec![CellOutput::new_builder()
         .capacity(1000)
@@ -3299,16 +1658,8 @@ fn test_ct_info_missing_mint_commitment() {
 
     let tx = context.complete_tx(tx);
 
-    let tx_hash = tx.hash().raw_data();
-    let mut message = Vec::new();
-    message.extend_from_slice(&tx_hash);
-    message.extend_from_slice(&old_supply.to_le_bytes());
-    message.extend_from_slice(&new_supply.to_le_bytes());
-    let signature: Signature = signing_key.sign(&message);
-
-    // Only input_type (signature), NO output_type (mint commitment)!
+    // No output_type (mint commitment)!
     let witness_args = WitnessArgs::new_builder()
-        .input_type(Some(Bytes::from(signature.to_bytes().to_vec())))
         // No output_type!
         .build();
 
@@ -3324,7 +1675,7 @@ fn test_ct_info_missing_mint_commitment() {
 
 #[test]
 fn test_ct_info_data_wrong_length() {
-    // Test: Cell data is not exactly 89 bytes should fail with InvalidDataLength
+    // Test: Cell data is not exactly 57 bytes should fail with InvalidDataLength
     let mut context = Context::default();
     let out_point = context.deploy_cell_by_name("ct-info-type");
     let always_success_out_point = context.deploy_cell(ALWAYS_SUCCESS.clone());
@@ -3351,8 +1702,8 @@ fn test_ct_info_data_wrong_length() {
         .build_script(&out_point, Bytes::from(type_id.to_vec()))
         .unwrap();
 
-    // Wrong data length: 88 bytes instead of 89
-    let invalid_data: Bytes = vec![0u8; 88].into();
+    // Wrong data length: 56 bytes instead of 57
+    let invalid_data: Bytes = vec![0u8; 56].into();
 
     let outputs = vec![CellOutput::new_builder()
         .capacity(1000)

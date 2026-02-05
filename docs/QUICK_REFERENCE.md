@@ -2,14 +2,13 @@
 
 ## Cell Data Format
 
-### CT-Info-Type Cell (89 bytes)
+### CT-Info-Type Cell (57 bytes)
 ```rust
 struct CtInfoData {
-    total_supply: u128,      // [0..16]   Current supply
-    issuer_pubkey: [u8; 32], // [16..48]  Ed25519 public key (immutable)
-    supply_cap: u128,        // [48..64]  Max supply, 0 = unlimited (immutable)
-    reserved: [u8; 24],      // [64..88]  Reserved (immutable)
-    flags: u8,               // [88]      MINTABLE = 0x01 (immutable)
+    total_supply: u128, // [0..16]   Current supply
+    supply_cap: u128,   // [16..32]  Max supply, 0 = unlimited (immutable)
+    reserved: [u8; 24], // [32..56]  Reserved (immutable)
+    flags: u8,          // [56]      MINTABLE = 0x01 (immutable)
 }
 ```
 
@@ -24,9 +23,9 @@ struct CtInfoData {
 ### 1. Create Token (Genesis)
 ```rust
 // No inputs, 1 ct-info-type output
+// Lock script controls who can mint!
 let ct_info_data = create_ct_info_data(
     0,                    // initial supply
-    &issuer_pubkey,       // Ed25519 public key
     1_000_000,            // supply cap (0 = unlimited)
     0x01,                 // MINTABLE flag
 );
@@ -76,26 +75,25 @@ assert_eq!(ct_token_commitments.sum(), mint_commitment);
 
 | Code | Error | Description |
 |------|-------|-------------|
-| 5 | InvalidDataLength | Cell data != 89 bytes |
+| 5 | InvalidDataLength | Cell data != 57 bytes |
 | 6 | InvalidArgsLength | Type args != 33 bytes |
 | 7 | InvalidCellCount | Wrong number of inputs/outputs |
-| 8 | ImmutableFieldChanged | Changed issuer/cap/reserved/flags |
+| 8 | ImmutableFieldChanged | Changed cap/reserved/flags |
 | 9 | MintingDisabled | MINTABLE flag not set |
 | 10 | SupplyCapExceeded | new_supply > cap |
 | 11 | InvalidMintAmount | minted <= 0 |
 | 12 | SupplyOverflow | Arithmetic overflow |
 | 13 | InvalidMintCommitment | Bad mint commitment |
 | 14 | WitnessFormatError | Missing witness data |
+| 15 | InvalidTypeId | Type ID verification failed |
 
 ## Validation Rules
 
 ### Genesis (0 inputs → 1 output)
-- ✓ issuer_pubkey != [0; 32]
 - ✓ flags & MINTABLE == 0x01
 
 ### Mint (1 input → 1 output)
 - ✓ token_id unchanged
-- ✓ issuer_pubkey unchanged
 - ✓ supply_cap unchanged
 - ✓ reserved unchanged
 - ✓ flags unchanged
@@ -126,13 +124,11 @@ Where mint_commitment comes from witness[0].input_type (32 bytes)
 
 ```rust
 // 1. Setup
-let issuer_key = SigningKey::generate(&mut OsRng);
-let issuer_pubkey = issuer_key.verifying_key().to_bytes();
 let token_id = [1u8; 32];
 
 // 2. Create token (genesis)
 // NOTE: Use proper lock script for authorization!
-let genesis_data = create_ct_info_data(0, &issuer_pubkey, 1_000_000, 0x01);
+let genesis_data = create_ct_info_data(0, 1_000_000, 0x01);
 // ... build and submit genesis tx
 
 // 3. Mint 100 tokens
@@ -178,13 +174,11 @@ cargo test test_ct_info_mint_without_mint_commitment
 3. **Single Info Cell**: One ct-info-type cell per token enforces serialization
 4. **Mint Commitment**: Uses zero blinding factor (minted amount is public anyway)
 5. **Lock Script Authorization**: Type script validates state, lock script authorizes
-6. **Immutable Authority**: Issuer pubkey cannot be changed after genesis
-7. **Cap Optional**: supply_cap = 0 means unlimited minting
+6. **Cap Optional**: supply_cap = 0 means unlimited minting
 
 ## Security Notes
 
 - ⚠️ Use proper lock script for authorization (NOT always_success in production!)
-- ⚠️ Keep issuer private key secure (no key rotation after genesis)
 - ⚠️ Set supply_cap in genesis (cannot change later)
 - ⚠️ Minted amounts are PUBLIC (supply delta visible)
 - ✓ Transfer amounts remain PRIVATE (Pedersen commitments)

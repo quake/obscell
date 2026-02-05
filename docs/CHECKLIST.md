@@ -5,7 +5,7 @@
 ### Design & Documentation
 - [x] Complete design document written (`docs/ct-info-type-design.md`)
 - [x] Architecture decision documented (Approach A: separate ct-info-type)
-- [x] Cell layouts specified (89 bytes for ct-info, 64 bytes for ct-token)
+- [x] Cell layouts specified (57 bytes for ct-info, 64 bytes for ct-token)
 - [x] Validation rules defined (genesis, mint, errors)
 - [x] Transaction structures documented
 - [x] Security analysis completed
@@ -14,30 +14,26 @@
 
 ### Contract Implementation
 - [x] ct-info-type contract implemented (`contracts/ct-info-type/src/main.rs`)
-  - [x] CtInfoData structure (89 bytes)
+  - [x] CtInfoData structure (57 bytes)
   - [x] Genesis validation (0 inputs → 1 output)
   - [x] Mint validation (1 input → 1 output)
   - [x] Immutability checks
   - [x] Supply cap enforcement
-  - [x] Ed25519 signature verification
-  - [x] Error handling (15 error codes)
+  - [x] Error handling (12 error codes)
 - [x] ct-token-type modified for mint support (`contracts/ct-token-type/src/main.rs`)
   - [x] Mint commitment detection
   - [x] Modified balance equation: `input_sum + mint_commitment = output_sum`
   - [x] Backward compatible with regular transfers
 - [x] Dependencies added
-  - [x] ed25519-dalek for ct-info-type
   - [x] curve25519-dalek for ct-info-type
 
 ### Testing
 - [x] Test infrastructure updated
-  - [x] ed25519-dalek added to test dependencies
   - [x] Helper function `create_ct_info_data()`
 - [x] ct-info-type unit tests written
   - [x] `test_ct_info_genesis()` - Token creation
   - [x] `test_ct_info_mint_basic()` - Valid minting
   - [x] `test_ct_info_mint_exceed_cap()` - Cap enforcement
-  - [x] `test_ct_info_mint_without_signature()` - Authorization
 
 ### Build Verification
 - [x] ct-info-type compiles successfully (93KB binary)
@@ -54,16 +50,16 @@
 - No changes to working ct-token-type
 - Explicit supply tracking
 - Plain integer supply for auditing (mint amounts public, transfer amounts private)
+- Lock script handles authorization (CKB's native model)
 
 ### 2. Cell Layouts
 
-**CT-Info-Type Cell (89 bytes)**:
+**CT-Info-Type Cell (57 bytes)**:
 ```
 [0..16]   total_supply: u128        Current total supply
-[16..48]  issuer_pubkey: [u8; 32]   Ed25519 public key (immutable)
-[48..64]  supply_cap: u128          Max supply, 0 = unlimited (immutable)
-[64..88]  reserved: [u8; 24]        Reserved for future use
-[88]      flags: u8                 MINTABLE = 0x01
+[16..32]  supply_cap: u128          Max supply, 0 = unlimited (immutable)
+[32..56]  reserved: [u8; 24]        Reserved for future use
+[56]      flags: u8                 MINTABLE = 0x01
 ```
 
 **Type Script Args (33 bytes)**:
@@ -77,18 +73,17 @@
 **Genesis Transaction (Create Token)**:
 - Condition: 0 inputs → 1 output
 - Requirements:
-  - issuer_pubkey is set (not zero)
   - MINTABLE flag is set
   - total_supply >= 0
 
 **Mint Transaction**:
 - Condition: 1 input → 1 output
 - Requirements:
-  - Immutable fields unchanged (token_id, issuer, cap, flags)
+  - Immutable fields unchanged (token_id, cap, flags)
   - MINTABLE flag set
   - minted_amount = new_supply - old_supply > 0
   - new_supply <= cap (if cap > 0)
-  - Valid Ed25519 signature on (tx_hash || old_supply || new_supply)
+  - Lock script authorizes the transaction
 
 **Cross-Validation**:
 - ct-info-type computes mint_commitment = minted_amount * G
@@ -116,12 +111,12 @@ Witness: [0].input_type: Ed25519 signature (64 bytes)
 ### 5. Security Properties
 
 ✅ **Supply Integrity**: Total supply public and verified on-chain
-✅ **Authorization**: Only issuer can mint (Ed25519 signature)
+✅ **Authorization**: Only lock script owner can mint
 ✅ **Cap Enforcement**: Cannot exceed supply_cap
 ✅ **Commitment Consistency**: Minted tokens sum to declared amount
 ✅ **Privacy Preservation**: Transfer amounts remain confidential
-✅ **Replay Protection**: Signature covers tx_hash
-✅ **Immutability**: Issuer and cap cannot change after genesis
+✅ **Replay Protection**: Each mint consumes the ct-info cell
+✅ **Immutability**: Cap cannot change after genesis
 ✅ **Overflow Protection**: Supply arithmetic checked
 
 ## 🎯 Design Goals Achieved
@@ -133,7 +128,7 @@ Witness: [0].input_type: Ed25519 signature (64 bytes)
 | No external registry | ✅ | Single on-chain ct-info cell per token |
 | Play nicely with stealth+ct-token | ✅ | Minimal changes, backward compatible |
 | Public verifiability | ✅ | Supply changes visible, arithmetic verified |
-| Authorization | ✅ | Ed25519 signature required for mints |
+| Authorization | ✅ | Lock script controls minting |
 | Supply cap | ✅ | Enforced by ct-info-type script |
 
 ## 📁 Files Modified/Created
@@ -145,10 +140,9 @@ Witness: [0].input_type: Ed25519 signature (64 bytes)
 - `contracts/ct-info-type/src/main.rs` (252 lines) - Contract implementation
 
 ### Modified
-- `contracts/ct-info-type/Cargo.toml` - Added ed25519-dalek, curve25519-dalek
+- `contracts/ct-info-type/Cargo.toml` - Added curve25519-dalek
 - `contracts/ct-token-type/src/main.rs` (191 lines) - Added mint commitment support
-- `tests/src/tests.rs` - Added 4 ct-info tests + helper function
-- `tests/Cargo.toml` - Added ed25519-dalek dependency
+- `tests/src/tests.rs` - Added ct-info tests + helper function
 
 ### Unchanged
 - `contracts/stealth-lock/` - No changes needed ✓
@@ -182,10 +176,10 @@ Witness: [0].input_type: Ed25519 signature (64 bytes)
 
 - **Design Documentation**: 765 lines
 - **Implementation**: 252 lines (ct-info-type) + 24 lines (ct-token-type changes)
-- **Tests**: 4 unit tests + 1 helper function
+- **Tests**: 3 unit tests + 1 helper function
 - **Binary Size**: 93 KB (ct-info-type)
-- **Error Codes**: 15 (comprehensive error handling)
-- **Cell Data Size**: 89 bytes (ct-info-type)
+- **Error Codes**: 12 (comprehensive error handling)
+- **Cell Data Size**: 57 bytes (ct-info-type)
 - **Type Args Size**: 33 bytes
 
 ## ✨ Summary
@@ -193,7 +187,7 @@ Witness: [0].input_type: Ed25519 signature (64 bytes)
 The ct-info-type implementation is **complete and ready for testing**. The system provides:
 
 1. **Minting capability** with public supply tracking
-2. **Authorization** via Ed25519 signatures  
+2. **Authorization** via lock script (CKB's native model)
 3. **Supply cap enforcement** to prevent infinite minting
 4. **Privacy preservation** for transfers (amounts stay confidential)
 5. **On-chain verification** without external registries

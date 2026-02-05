@@ -10,7 +10,7 @@ This document describes the design and implementation of the `ct-info-type` scri
 - Public supply tracking for auditability
 - Confidential transfer amounts (via ct-token-type)
 - On-chain verification, no external registries
-- Issuer authorization via Ed25519 signatures
+- Authorization via lock script (CKB design principle)
 - Supply cap enforcement
 
 ## Architecture
@@ -49,15 +49,14 @@ Offset | Size | Field       | Description
 32     | 1    | version     | Protocol version (0 for v1)
 ```
 
-**Cell Data (89 bytes)**:
+**Cell Data (57 bytes)**:
 ```
 Offset | Size | Field         | Description
 -------|------|---------------|----------------------------------
 0      | 16   | total_supply  | Current total supply (u128, little-endian)
-16     | 32   | issuer_pubkey | Ed25519 public key (immutable)
-48     | 16   | supply_cap    | Max supply, 0 = unlimited (immutable)
-64     | 24   | reserved      | Reserved for future use (immutable after genesis)
-88     | 1    | flags         | Bit flags (see below)
+16     | 16   | supply_cap    | Max supply, 0 = unlimited (immutable)
+32     | 24   | reserved      | Reserved for future use (immutable after genesis)
+56     | 1    | flags         | Bit flags (see below)
 ```
 
 **Flags Bitfield**:
@@ -96,7 +95,6 @@ Condition: group_input_count == 0 (no ct-info-type inputs)
 
 Requirements:
   - Exactly 1 ct-info-type output exists
-  - issuer_pubkey != [0; 32]
   - flags & MINTABLE == MINTABLE
   - total_supply >= 0 (can start at 0 or premint)
 
@@ -113,17 +111,16 @@ Load:
 
 Immutability Checks:
   a) output.token_id == input.token_id
-  b) output.issuer_pubkey == input.issuer_pubkey
-  c) output.supply_cap == input.supply_cap
-  d) output.reserved == input.reserved
-  e) output.flags == input.flags
+  b) output.supply_cap == input.supply_cap
+  c) output.reserved == input.reserved
+  d) output.flags == input.flags
 
 Mint Validation:
-  f) input.flags & MINTABLE == MINTABLE
-  g) minted_amount = output.total_supply - input.total_supply
-  h) minted_amount > 0
-  i) IF input.supply_cap > 0 THEN output.total_supply <= input.supply_cap
-  j) No overflow: output.total_supply >= input.total_supply
+  e) input.flags & MINTABLE == MINTABLE
+  f) minted_amount = output.total_supply - input.total_supply
+  g) minted_amount > 0
+  h) IF input.supply_cap > 0 THEN output.total_supply <= input.supply_cap
+  i) No overflow: output.total_supply >= input.total_supply
 
 Authorization:
   NOTE: Authorization is NOT handled by this type script.
@@ -134,8 +131,8 @@ Authorization:
     - Type script: WHAT state transitions are valid (validation)
 
 Mint Commitment:
-  k) Compute mint_commitment = minted_amount * G + 0 * H
-  l) Verify mint_commitment in witness.output_type matches expected value
+  j) Compute mint_commitment = minted_amount * G + 0 * H
+  k) Verify mint_commitment in witness.output_type matches expected value
 
 Result: PASS if all checks succeed
 ```
@@ -192,9 +189,9 @@ Inputs:  (any CKB cells for fees)
 
 Outputs:
   [0] ct-info-type cell
-      - Data: supply=0 (or premint), issuer_pubkey, cap, flags=MINTABLE
+      - Data: supply=0 (or premint), cap, flags=MINTABLE
       - Type: ct-info-type script with unique token_id
-      - Lock: Any
+      - Lock: Authorization lock script (controls who can mint)
 
 Cell Deps:
   - ct-info-type script code
@@ -205,11 +202,10 @@ Witnesses:
 
 **Example**:
 ```rust
-// Create token with ID, issuer, cap of 1,000,000
+// Create token with ID, cap of 1,000,000
 let token_id = tx_hash;  // First tx hash as unique ID
 let ct_info_data = CtInfoData {
     total_supply: 0,
-    issuer_pubkey: issuer_ed25519_pubkey,
     supply_cap: 1_000_000,
     flags: MINTABLE,
     ..default()
@@ -235,7 +231,6 @@ Cell Deps:
 
 Witnesses:
   [0] WitnessArgs {
-        input_type: issuer_signature (64 bytes Ed25519),
         output_type: mint_commitment (32 bytes compressed Ristretto)
       }
   [1] WitnessArgs {
@@ -255,7 +250,6 @@ Output ct-tokens:
 
 Validation:
   - ct-info-type: 1100 = 1000 + 100 ✓
-  - ct-info-type: verify issuer signature ✓
   - ct-info-type: compute mint_commitment = 100*G + 0*H
   - ct-token-type: C1 + C2 = mint_commitment ✓
   - ct-token-type: verify range proofs for C1, C2 ✓
@@ -281,7 +275,6 @@ Cell Deps:
 
 Witnesses:
   [0] WitnessArgs {
-        input_type: issuer_signature,
         output_type: mint_commitment
       }
   [1] WitnessArgs {
@@ -415,7 +408,6 @@ verify_range_proofs(...)?;
 - This follows CKB's separation of concerns:
   - Lock script: WHO can spend (authorization)
   - Type script: WHAT transitions are valid (validation)
-- Issuer pubkey stored in cell data for reference/auditability
 - Recommended: Use a production-proven lock script from CKB ecosystem
 
 **S3: Cap Enforcement**
@@ -472,15 +464,7 @@ Defense: Lock script of ct-info-type cell handles authorization.
          Production deployments MUST use a proper authorization lock script.
 ```
 
-**Attack 5: Change Issuer**
-```
-Attempt: Replace issuer_pubkey to gain mint authority
-
-Defense: ct-info-type enforces immutability:
-         output.issuer_pubkey == input.issuer_pubkey
-```
-
-**Attack 6: Overflow Supply**
+**Attack 5: Overflow Supply**
 ```
 Attempt: Mint u128::MAX to wrap supply to zero
 
@@ -499,15 +483,14 @@ Defense: ct-info-type checks:
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct CtInfoData {
-    pub total_supply: u128,      // [0..16]
-    pub issuer_pubkey: [u8; 32], // [16..48]
-    pub supply_cap: u128,        // [48..64]
-    pub reserved: [u8; 24],      // [64..88]
-    pub flags: u8,               // [88]
+    pub total_supply: u128, // [0..16]
+    pub supply_cap: u128,   // [16..32]
+    pub reserved: [u8; 24], // [32..56]
+    pub flags: u8,          // [56]
 }
 
 impl CtInfoData {
-    pub const SIZE: usize = 89;
+    pub const SIZE: usize = 57;
     
     pub fn from_bytes(data: &[u8]) -> Result<Self, Error> {
         if data.len() != Self::SIZE {
@@ -530,10 +513,9 @@ pub mod flags {
 
 ### Dependencies
 
-**New dependencies for ct-info-type**:
+**Dependencies for ct-info-type**:
 ```toml
 [dependencies]
-ed25519-dalek = { version = "2", default-features = false }
 curve25519-dalek = { version = "4", default-features = false }
 ```
 
@@ -563,9 +545,9 @@ pub enum Error {
     SupplyCapExceeded,
     InvalidMintAmount,
     SupplyOverflow,
-    InvalidSignature,
     InvalidMintCommitment,
     WitnessFormatError,
+    InvalidTypeId,
 }
 ```
 
@@ -592,11 +574,10 @@ pub enum Error {
 ### Cycle Budget
 
 **Estimated cycles**:
-- ct-info-type validation: ~5-10M cycles
+- ct-info-type validation: ~3-5M cycles
   - Cell data parsing: ~100K
-  - Signature verification: ~5M (Ed25519)
   - Mint commitment computation: ~2M
-  
+   
 - ct-token-type validation: ~500M-1B cycles (unchanged)
   - Commitment arithmetic: ~5M
   - Range proof verification: ~500M-1B (Bulletproofs)
@@ -645,20 +626,8 @@ fn test_mint_exceed_cap() {
 }
 
 #[test]
-fn test_mint_without_signature() {
-    // Try to mint without issuer signature
-    // Verify: fails
-}
-
-#[test]
-fn test_mint_wrong_signature() {
-    // Try to mint with different key's signature
-    // Verify: fails
-}
-
-#[test]
-fn test_immutable_issuer() {
-    // Try to change issuer_pubkey
+fn test_mint_without_mint_commitment() {
+    // Try to mint without providing mint_commitment
     // Verify: fails
 }
 
@@ -761,7 +730,6 @@ pub struct CtInfoData {
 - [Nervos CKB Documentation](https://docs.nervos.org/)
 - [Pedersen Commitments](https://crypto.stanford.edu/~dabo/pubs/abstracts/aggreg.html)
 - [Bulletproofs](https://crypto.stanford.edu/bulletproofs/)
-- [Ed25519 Signature Scheme](https://ed25519.cr.yp.to/)
 - [Bitcoin Stealth Addresses](https://github.com/bitcoin/bips/blob/master/bip-0047.mediawiki)
 
 ## Changelog
@@ -769,6 +737,6 @@ pub struct CtInfoData {
 ### v1 (2026-01-25)
 - Initial design
 - Plain integer supply tracking
-- Ed25519 issuer authorization
+- Lock script authorization (removed Ed25519 from type script)
 - Mint commitment coordination
 - Supply cap enforcement

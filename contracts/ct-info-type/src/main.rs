@@ -36,7 +36,6 @@ pub enum Error {
     SupplyOverflow,
     InvalidMintCommitment,
     WitnessFormatError,
-    InvalidIssuerPubkey,
     InvalidTypeId,
 }
 
@@ -70,15 +69,14 @@ pub mod flags {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct CtInfoData {
-    pub total_supply: u128,      // [0..16]
-    pub issuer_pubkey: [u8; 32], // [16..48]
-    pub supply_cap: u128,        // [48..64]
-    pub reserved: [u8; 24],      // [64..88]
-    pub flags: u8,               // [88]
+    pub total_supply: u128, // [0..16]
+    pub supply_cap: u128,   // [16..32]
+    pub reserved: [u8; 24], // [32..56]
+    pub flags: u8,          // [56]
 }
 
 impl CtInfoData {
-    pub const SIZE: usize = 89;
+    pub const SIZE: usize = 57;
 
     pub fn from_bytes(data: &[u8]) -> Result<Self, Error> {
         if data.len() != Self::SIZE {
@@ -89,21 +87,17 @@ impl CtInfoData {
         total_supply_bytes.copy_from_slice(&data[0..16]);
         let total_supply = u128::from_le_bytes(total_supply_bytes);
 
-        let mut issuer_pubkey = [0u8; 32];
-        issuer_pubkey.copy_from_slice(&data[16..48]);
-
         let mut supply_cap_bytes = [0u8; 16];
-        supply_cap_bytes.copy_from_slice(&data[48..64]);
+        supply_cap_bytes.copy_from_slice(&data[16..32]);
         let supply_cap = u128::from_le_bytes(supply_cap_bytes);
 
         let mut reserved = [0u8; 24];
-        reserved.copy_from_slice(&data[64..88]);
+        reserved.copy_from_slice(&data[32..56]);
 
-        let flags = data[88];
+        let flags = data[56];
 
         Ok(CtInfoData {
             total_supply,
-            issuer_pubkey,
             supply_cap,
             reserved,
             flags,
@@ -113,10 +107,9 @@ impl CtInfoData {
     pub fn to_bytes(&self) -> [u8; Self::SIZE] {
         let mut bytes = [0u8; Self::SIZE];
         bytes[0..16].copy_from_slice(&self.total_supply.to_le_bytes());
-        bytes[16..48].copy_from_slice(&self.issuer_pubkey);
-        bytes[48..64].copy_from_slice(&self.supply_cap.to_le_bytes());
-        bytes[64..88].copy_from_slice(&self.reserved);
-        bytes[88] = self.flags;
+        bytes[16..32].copy_from_slice(&self.supply_cap.to_le_bytes());
+        bytes[32..56].copy_from_slice(&self.reserved);
+        bytes[56] = self.flags;
         bytes
     }
 }
@@ -154,11 +147,6 @@ fn validate_genesis(output_count: usize) -> Result<(), Error> {
     let output_data = load_cell_data(0, Source::GroupOutput)?;
     let output_info = CtInfoData::from_bytes(&output_data)?;
 
-    // Check issuer is set (not all zeros)
-    if output_info.issuer_pubkey == [0u8; 32] {
-        return Err(Error::InvalidIssuerPubkey);
-    }
-
     // Check mintable flag is set
     if output_info.flags & flags::MINTABLE != flags::MINTABLE {
         return Err(Error::MintingDisabled);
@@ -176,9 +164,6 @@ fn validate_mint() -> Result<(), Error> {
     let output_info = CtInfoData::from_bytes(&output_data)?;
 
     // Check immutable fields
-    if input_info.issuer_pubkey != output_info.issuer_pubkey {
-        return Err(Error::ImmutableFieldChanged);
-    }
     if input_info.supply_cap != output_info.supply_cap {
         return Err(Error::ImmutableFieldChanged);
     }

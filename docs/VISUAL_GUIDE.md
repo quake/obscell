@@ -22,7 +22,7 @@
 ## Cell Structure
 
 ```
-CT-Info-Type Cell (89 bytes)
+CT-Info-Type Cell (57 bytes)
 ┌────────────────────────────────────────────────┐
 │ Type Script                                    │
 │ ┌──────────────────────────────────────────┐  │
@@ -30,13 +30,12 @@ CT-Info-Type Cell (89 bytes)
 │ │ Args: [token_id: 32B][version: 1B]       │  │
 │ └──────────────────────────────────────────┘  │
 │                                                │
-│ Data (89 bytes)                                │
+│ Data (57 bytes)                                │
 │ ┌──────────────────────────────────────────┐  │
 │ │ total_supply:    u128    [0..16]         │  │
-│ │ issuer_pubkey:   [u8;32] [16..48]        │  │
-│ │ supply_cap:      u128    [48..64]        │  │
-│ │ reserved:        [u8;24] [64..88]        │  │
-│ │ flags:           u8      [88]            │  │
+│ │ supply_cap:      u128    [16..32]        │  │
+│ │ reserved:        [u8;24] [32..56]        │  │
+│ │ flags:           u8      [56]            │  │
 │ └──────────────────────────────────────────┘  │
 └────────────────────────────────────────────────┘
 
@@ -72,7 +71,6 @@ Outputs:
 │ CT-Info Cell                            │
 │ ┌─────────────────────────────────────┐ │
 │ │ supply:  0                          │ │
-│ │ issuer:  Ed25519_PubKey             │ │
 │ │ cap:     1,000,000                  │ │
 │ │ flags:   MINTABLE                   │ │
 │ └─────────────────────────────────────┘ │
@@ -81,7 +79,6 @@ Outputs:
 Witnesses: (none required)
 
 Validation:
-✓ issuer_pubkey != 0
 ✓ flags & MINTABLE == 1
 ```
 
@@ -114,7 +111,6 @@ Outputs:
 
 Witnesses:
 [0] ┌────────────────────────────────────┐
-    │ input_type:  Ed25519 signature     │ ← issuer signs
     │ output_type: mint_commitment(100)  │ ← for ct-token
     └────────────────────────────────────┘
 [1] ┌────────────────────────────────────┐
@@ -125,7 +121,6 @@ Validation:
 ct-info-type:
   ✓ supply increase: 100 - 0 = 100 > 0
   ✓ supply <= cap: 100 <= 1,000,000
-  ✓ issuer signature valid
   ✓ immutable fields unchanged
 
 ct-token-type:
@@ -176,41 +171,40 @@ ct-token-type:
   ✓ This proves: 50 + 100 = 150 (split as 90 + 60)
 ```
 
-## Signature Flow
+## Authorization Model
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│ Issuer Signature Creation & Verification                │
+│ Lock Script Authorization                               │
 └─────────────────────────────────────────────────────────┘
 
-Off-chain (Transaction Construction):
+CKB's Native Security Model:
 ┌────────────────────────────────────────┐
-│ 1. Build transaction                   │
-│ 2. Get tx_hash                         │
-│ 3. Construct message:                  │
-│    message = tx_hash                   │
-│            || old_supply (16 bytes)    │
-│            || new_supply (16 bytes)    │
-│    Total: 64 bytes                     │
-│ 4. Sign with issuer private key:      │
-│    signature = Ed25519.sign(message)   │
-│ 5. Attach to witness[0].input_type     │
+│ Lock Script = WHO can spend the cell   │
+│ Type Script = WHAT transitions valid   │
+│                                        │
+│ ct-info-type uses this separation:     │
+│ - Lock script controls mint permission │
+│ - Type script validates state changes  │
 └────────────────────────────────────────┘
 
-On-chain (ct-info-type validation):
+Mint Authorization Flow:
 ┌────────────────────────────────────────┐
-│ 1. Load tx_hash                        │
-│ 2. Load old_supply from input cell     │
-│ 3. Load new_supply from output cell    │
-│ 4. Reconstruct message                 │
-│ 5. Load signature from witness         │
-│ 6. Load issuer_pubkey from input cell  │
-│ 7. Verify:                             │
-│    Ed25519.verify(                     │
-│      pubkey=issuer_pubkey,             │
-│      message=message,                  │
-│      signature=signature               │
-│    )                                   │
+│ 1. ct-info cell has a lock script     │
+│    (e.g., secp256k1, multisig, DAO)   │
+│                                        │
+│ 2. To mint, must unlock the cell      │
+│    (satisfy lock script requirements)  │
+│                                        │
+│ 3. ct-info-type validates:            │
+│    - Supply increase is valid          │
+│    - Cap not exceeded                  │
+│    - Immutable fields unchanged        │
+│                                        │
+│ Benefits:                              │
+│ - Flexible authorization schemes       │
+│ - Reuse existing lock scripts          │
+│ - Multi-sig, time-locks, DAOs, etc.   │
 └────────────────────────────────────────┘
 ```
 
@@ -287,7 +281,6 @@ Validation Decision Tree:
 
 Input Count?
   ├─ 0: Genesis
-  │   ├─ issuer_pubkey == 0? → InvalidSignature (13)
   │   ├─ flags & MINTABLE == 0? → MintingDisabled (9)
   │   └─ All good → PASS ✓
   │
@@ -298,8 +291,8 @@ Input Count?
       ├─ minted <= 0? → InvalidMintAmount (11)
       ├─ new_supply > cap? → SupplyCapExceeded (10)
       ├─ Overflow? → SupplyOverflow (12)
-      ├─ Bad signature? → InvalidSignature (13)
       └─ All good → PASS ✓
+      (Lock script handles authorization separately)
 
 Other:
   └─ Input Count > 1 or != Output Count → InvalidCellCount (7)
@@ -316,7 +309,6 @@ Other:
 │  ✓ Total token supply                                  │
 │  ✓ Supply increases (minted amounts)                   │
 │  ✓ Supply cap                                          │
-│  ✓ Issuer public key                                   │
 │  ✓ Token exists                                        │
 │                                                         │
 │  PRIVATE (Hidden by crypto):                           │
@@ -359,9 +351,9 @@ AFTER (With Minting):
 
 This visual guide shows how ct-info-type enables:
 
-1. **Genesis**: Create tokens with issuer authority
-2. **Minting**: Increase supply with authorization
+1. **Genesis**: Create tokens with lock script authority
+2. **Minting**: Increase supply with lock script authorization
 3. **Tracking**: Public supply for auditing
 4. **Integration**: Works with existing stealth + ct-token
-5. **Security**: Signature verification + cap enforcement
+5. **Security**: Lock script authorization + cap enforcement
 6. **Privacy**: Transfers remain confidential
