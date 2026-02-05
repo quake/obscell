@@ -15,3 +15,4 @@ curve25519-dalek = { version = "4", default-features = false, features = ["alloc
 bulletproofs = { git = "https://github.com/zkcrypto/bulletproofs", default-features = false }
 merlin = { version = "3", default-features = false }
 rand_core = "0.6"
+ed25519-dalek = { version = "2", features = ["rand_core"] }

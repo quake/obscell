@@ -7,8 +7,12 @@ extern crate alloc;
 use bulletproofs::{BulletproofGens, PedersenGens, RangeProof};
 use ckb_std::{
     ckb_constants::Source,
+    ckb_types::prelude::Unpack,
     error::SysError,
-    high_level::{QueryIter, load_cell_data, load_tx_hash, load_witness_args},
+    high_level::{
+        QueryIter, load_cell_data, load_cell_type_hash, load_script, load_tx_hash,
+        load_witness_args,
+    },
 };
 use curve25519_dalek::{RistrettoPoint, ristretto::CompressedRistretto};
 use merlin::Transcript;
@@ -36,6 +40,9 @@ pub enum Error {
     InputOutputSumMismatch,
     InvalidRangeProofWitnessFormat,
     InvalidRangeProof,
+    InvalidMintCommitment,
+    MissingCtInfoType,
+    InvalidScriptArgs,
 }
 
 impl From<SysError> for Error {
@@ -85,8 +92,50 @@ fn auth() -> Result<(), Error> {
         value_commitments.push(cr);
     }
 
-    if input_sum != output_sum {
-        return Err(Error::InputOutputSumMismatch);
+    // Check for mint commitment in witness
+    // If ct-info-type is present, it will provide mint_commitment in witness[0].input_type
+    let witness_args = load_witness_args(0, Source::GroupOutput)?;
+    let mint_commitment_opt = witness_args.input_type().to_opt();
+
+    if let Some(mint_commitment_bytes) = mint_commitment_opt {
+        // This is a mint transaction - MUST verify ct-info-type exists
+
+        // Load script args to get ct-info-type code_hash
+        let script = load_script()?;
+        let script_args = script.args().raw_data();
+
+        // Script args format: [ct_info_code_hash: 32 bytes] + [optional: other data]
+        if script_args.len() < 32 {
+            return Err(Error::InvalidScriptArgs);
+        }
+
+        let ct_info_code_hash: [u8; 32] = script_args[0..32].try_into().unwrap();
+
+        // Verify ct-info-type exists in transaction inputs
+        let ct_info_found = verify_ct_info_exists(&ct_info_code_hash)?;
+        if !ct_info_found {
+            return Err(Error::MissingCtInfoType);
+        }
+
+        let mint_commitment_data = mint_commitment_bytes.raw_data();
+        if mint_commitment_data.len() != 32 {
+            return Err(Error::InvalidMintCommitment);
+        }
+
+        let mint_commitment = CompressedRistretto::from_slice(&mint_commitment_data)
+            .ok()
+            .and_then(|cr| cr.decompress())
+            .ok_or(Error::InvalidMintCommitment)?;
+
+        // For mint: input_sum + mint_commitment == output_sum
+        if input_sum + mint_commitment != output_sum {
+            return Err(Error::InputOutputSumMismatch);
+        }
+    } else {
+        // Regular transfer: input_sum == output_sum
+        if input_sum != output_sum {
+            return Err(Error::InputOutputSumMismatch);
+        }
     }
 
     let witness_args = load_witness_args(0, Source::GroupOutput)?
@@ -114,6 +163,12 @@ fn auth() -> Result<(), Error> {
 pub struct TxHashRng {
     s0: u64,
     s1: u64,
+}
+
+impl Default for TxHashRng {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TxHashRng {
@@ -164,3 +219,38 @@ impl rand_core::RngCore for TxHashRng {
 }
 
 impl rand_core::CryptoRng for TxHashRng {}
+
+/// Verify that ct-info-type script exists in the transaction inputs.
+/// This is required for mint transactions to ensure the mint_commitment
+/// was validated by ct-info-type.
+fn verify_ct_info_exists(ct_info_code_hash: &[u8; 32]) -> Result<bool, Error> {
+    // Iterate through all inputs to find a cell with ct-info-type
+    let mut index = 0;
+    loop {
+        match load_cell_type_hash(index, Source::Input) {
+            Ok(Some(_type_hash)) => {
+                // Check if this cell's type script code_hash matches ct-info-type
+                // Note: load_cell_type_hash returns the script hash, not code_hash
+                // We need to use load_cell_type to get the actual script and compare code_hash
+                if let Ok(Some(type_script)) =
+                    ckb_std::high_level::load_cell_type(index, Source::Input)
+                {
+                    let code_hash: [u8; 32] = type_script.code_hash().unpack();
+                    if code_hash == *ct_info_code_hash {
+                        return Ok(true);
+                    }
+                }
+            }
+            Ok(None) => {
+                // Cell has no type script, continue
+            }
+            Err(SysError::IndexOutOfBound) => {
+                // No more cells to check
+                break;
+            }
+            Err(e) => return Err(e.into()),
+        }
+        index += 1;
+    }
+    Ok(false)
+}
