@@ -6,8 +6,8 @@
 
 use blake2b_rs::Blake2bBuilder;
 use secp256k1::{
-    ecdsa::{RecoverableSignature, RecoveryId},
     Message, Secp256k1,
+    ecdsa::{RecoverableSignature, RecoveryId},
 };
 use std::ffi::CStr;
 use std::os::raw::c_char;

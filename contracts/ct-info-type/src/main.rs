@@ -7,7 +7,7 @@ extern crate alloc;
 use ckb_std::{
     ckb_constants::Source,
     error::SysError,
-    high_level::{load_cell_data, load_witness_args, QueryIter},
+    high_level::{QueryIter, load_cell_data, load_witness_args},
     type_id::check_type_id,
 };
 use curve25519_dalek::{
