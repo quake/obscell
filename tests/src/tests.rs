@@ -38,6 +38,12 @@ fn calculate_type_id(first_input: &CellInput, output_index: u64) -> [u8; 32] {
     blake2b_256(&data)
 }
 
+/// Compute script hash for a Script
+fn compute_script_hash(script: &Script) -> [u8; 32] {
+    use ckb_testtool::ckb_hash::blake2b_256;
+    blake2b_256(script.as_slice())
+}
+
 /// Compute mint commitment: amount * G + 0 * H
 fn compute_mint_commitment(minted_amount: u128) -> Bytes {
     let amount_scalar = Scalar::from(minted_amount);
@@ -252,10 +258,12 @@ fn test_stealth_lock_invalid_signature_length() {
     let input = CellInput::new_builder()
         .previous_output(input_out_point)
         .build();
-    let outputs = vec![CellOutput::new_builder()
-        .capacity(256)
-        .lock(lock_script)
-        .build()];
+    let outputs = vec![
+        CellOutput::new_builder()
+            .capacity(256)
+            .lock(lock_script)
+            .build(),
+    ];
 
     // Use a 64-byte signature instead of 65 bytes
     let invalid_signature = vec![0u8; 64];
@@ -311,10 +319,12 @@ fn test_stealth_lock_invalid_args_length() {
     let input = CellInput::new_builder()
         .previous_output(input_out_point)
         .build();
-    let outputs = vec![CellOutput::new_builder()
-        .capacity(256)
-        .lock(lock_script)
-        .build()];
+    let outputs = vec![
+        CellOutput::new_builder()
+            .capacity(256)
+            .lock(lock_script)
+            .build(),
+    ];
 
     let tx = TransactionBuilder::default()
         .cell_deps(cell_deps)
@@ -379,10 +389,12 @@ fn test_stealth_lock_wrong_signature() {
     let input = CellInput::new_builder()
         .previous_output(input_out_point)
         .build();
-    let outputs = vec![CellOutput::new_builder()
-        .capacity(256)
-        .lock(lock_script)
-        .build()];
+    let outputs = vec![
+        CellOutput::new_builder()
+            .capacity(256)
+            .lock(lock_script)
+            .build(),
+    ];
 
     let tx = TransactionBuilder::default()
         .cell_deps(cell_deps)
@@ -428,15 +440,22 @@ fn test_ct_token_mint_without_ct_info_type() {
         .build_script(&always_success_out_point, Bytes::new())
         .unwrap();
 
-    // Get ct-info-type code_hash for ct-token-type script args
-    let ct_info_type_script = context
-        .build_script(&ct_info_out_point, Bytes::from(vec![0u8; 33]))
+    // Create a fake ct-info script hash (for a ct-info cell that doesn't exist in the transaction)
+    let fake_token_id = [0x42u8; 32];
+    let mut fake_ct_info_args = Vec::new();
+    fake_ct_info_args.extend_from_slice(&fake_token_id);
+    fake_ct_info_args.push(0);
+    let fake_ct_info_script = context
+        .build_script(&ct_info_out_point, fake_ct_info_args.into())
         .unwrap();
-    let ct_info_code_hash: [u8; 32] = ct_info_type_script.code_hash().unpack();
+    let fake_ct_info_script_hash = compute_script_hash(&fake_ct_info_script);
 
-    // Create ct-token-type script with ct-info-type code_hash in args
+    // Create ct-token-type script with ct_info_script_hash in args (32 bytes)
     let type_script = context
-        .build_script(&ct_token_out_point, Bytes::from(ct_info_code_hash.to_vec()))
+        .build_script(
+            &ct_token_out_point,
+            Bytes::from(fake_ct_info_script_hash.to_vec()),
+        )
         .unwrap();
 
     let pc_gens = PedersenGens::default();
@@ -473,11 +492,13 @@ fn test_ct_token_mint_without_ct_info_type() {
     let mut output_data = c_out.compress().to_bytes().to_vec();
     output_data.extend_from_slice(&[0u8; 32]);
 
-    let outputs = vec![CellOutput::new_builder()
-        .capacity(1000)
-        .lock(lock_script)
-        .type_(Some(type_script))
-        .build()];
+    let outputs = vec![
+        CellOutput::new_builder()
+            .capacity(1000)
+            .lock(lock_script)
+            .type_(Some(type_script))
+            .build(),
+    ];
 
     // Create range proof
     let bp_gens = BulletproofGens::new(64, 1);
@@ -570,11 +591,13 @@ fn test_ct_token_mint_invalid_script_args() {
     let mut output_data = c_out.compress().to_bytes().to_vec();
     output_data.extend_from_slice(&[0u8; 32]);
 
-    let outputs = vec![CellOutput::new_builder()
-        .capacity(1000)
-        .lock(lock_script)
-        .type_(Some(type_script))
-        .build()];
+    let outputs = vec![
+        CellOutput::new_builder()
+            .capacity(1000)
+            .lock(lock_script)
+            .type_(Some(type_script))
+            .build(),
+    ];
 
     let bp_gens = BulletproofGens::new(64, 1);
     let mut prover_transcript = Transcript::new(b"ct-token-type");
@@ -655,11 +678,13 @@ fn test_ct_token_invalid_input_ristretto_point() {
     let mut output_data = c_out.compress().to_bytes().to_vec();
     output_data.extend_from_slice(&[0u8; 32]);
 
-    let outputs = vec![CellOutput::new_builder()
-        .capacity(1000)
-        .lock(lock_script)
-        .type_(Some(type_script))
-        .build()];
+    let outputs = vec![
+        CellOutput::new_builder()
+            .capacity(1000)
+            .lock(lock_script)
+            .type_(Some(type_script))
+            .build(),
+    ];
 
     let bp_gens = BulletproofGens::new(64, 1);
     let mut prover_transcript = Transcript::new(b"ct-token-type");
@@ -731,11 +756,13 @@ fn test_ct_token_invalid_output_ristretto_point() {
     let mut invalid_output_data = vec![0xFF; 32]; // Invalid point bytes
     invalid_output_data.extend_from_slice(&[0u8; 32]); // Padding
 
-    let outputs = vec![CellOutput::new_builder()
-        .capacity(1000)
-        .lock(lock_script)
-        .type_(Some(type_script))
-        .build()];
+    let outputs = vec![
+        CellOutput::new_builder()
+            .capacity(1000)
+            .lock(lock_script)
+            .type_(Some(type_script))
+            .build(),
+    ];
 
     // We still need a witness, though it won't be verified due to earlier failure
     let witness_args = WitnessArgs::new_builder().build();
@@ -770,16 +797,6 @@ fn test_ct_token_invalid_mint_commitment_length() {
         .build_script(&always_success_out_point, Bytes::new())
         .unwrap();
 
-    // Get ct-info-type code_hash
-    let ct_info_type_script = context
-        .build_script(&ct_info_out_point, Bytes::from(vec![0u8; 33]))
-        .unwrap();
-    let ct_info_code_hash: [u8; 32] = ct_info_type_script.code_hash().unpack();
-
-    let type_script = context
-        .build_script(&ct_token_out_point, Bytes::from(ct_info_code_hash.to_vec()))
-        .unwrap();
-
     // Create ct-info-type input
     let token_id = [43u8; 32];
     let mut ct_info_args = Vec::new();
@@ -787,6 +804,17 @@ fn test_ct_token_invalid_mint_commitment_length() {
     ct_info_args.push(0);
     let ct_info_script = context
         .build_script(&ct_info_out_point, ct_info_args.into())
+        .unwrap();
+
+    // Compute ct_info_script_hash for ct-token-type args
+    let ct_info_script_hash = compute_script_hash(&ct_info_script);
+
+    // Create ct-token-type script with ct_info_script_hash (32 bytes)
+    let type_script = context
+        .build_script(
+            &ct_token_out_point,
+            Bytes::from(ct_info_script_hash.to_vec()),
+        )
         .unwrap();
 
     let old_supply = 0u128;
@@ -919,21 +947,23 @@ fn test_ct_token_invalid_mint_commitment_point() {
         .build_script(&always_success_out_point, Bytes::new())
         .unwrap();
 
-    let ct_info_type_script = context
-        .build_script(&ct_info_out_point, Bytes::from(vec![0u8; 33]))
-        .unwrap();
-    let ct_info_code_hash: [u8; 32] = ct_info_type_script.code_hash().unpack();
-
-    let type_script = context
-        .build_script(&ct_token_out_point, Bytes::from(ct_info_code_hash.to_vec()))
-        .unwrap();
-
     let token_id = [44u8; 32];
     let mut ct_info_args = Vec::new();
     ct_info_args.extend_from_slice(&token_id);
     ct_info_args.push(0);
     let ct_info_script = context
         .build_script(&ct_info_out_point, ct_info_args.into())
+        .unwrap();
+
+    // Compute ct_info_script_hash for ct-token-type args
+    let ct_info_script_hash = compute_script_hash(&ct_info_script);
+
+    // Create ct-token-type script with ct_info_script_hash (32 bytes)
+    let type_script = context
+        .build_script(
+            &ct_token_out_point,
+            Bytes::from(ct_info_script_hash.to_vec()),
+        )
         .unwrap();
 
     let old_supply = 0u128;
@@ -1063,21 +1093,23 @@ fn test_ct_token_mint_commitment_sum_mismatch() {
         .build_script(&always_success_out_point, Bytes::new())
         .unwrap();
 
-    let ct_info_type_script = context
-        .build_script(&ct_info_out_point, Bytes::from(vec![0u8; 33]))
-        .unwrap();
-    let ct_info_code_hash: [u8; 32] = ct_info_type_script.code_hash().unpack();
-
-    let type_script = context
-        .build_script(&ct_token_out_point, Bytes::from(ct_info_code_hash.to_vec()))
-        .unwrap();
-
     let token_id = [45u8; 32];
     let mut ct_info_args = Vec::new();
     ct_info_args.extend_from_slice(&token_id);
     ct_info_args.push(0);
     let ct_info_script = context
         .build_script(&ct_info_out_point, ct_info_args.into())
+        .unwrap();
+
+    // Compute ct_info_script_hash for ct-token-type args
+    let ct_info_script_hash = compute_script_hash(&ct_info_script);
+
+    // Create ct-token-type script with ct_info_script_hash (32 bytes)
+    let type_script = context
+        .build_script(
+            &ct_token_out_point,
+            Bytes::from(ct_info_script_hash.to_vec()),
+        )
         .unwrap();
 
     let old_supply = 0u128;
@@ -1247,11 +1279,13 @@ fn test_ct_info_invalid_cell_count_2_inputs() {
 
     let output_data = create_ct_info_data(200, 1_000_000, MINTABLE);
 
-    let outputs = vec![CellOutput::new_builder()
-        .capacity(1000)
-        .lock(lock_script)
-        .type_(Some(type_script))
-        .build()];
+    let outputs = vec![
+        CellOutput::new_builder()
+            .capacity(1000)
+            .lock(lock_script)
+            .type_(Some(type_script))
+            .build(),
+    ];
 
     let cell_deps = vec![CellDep::new_builder().out_point(out_point).build()].pack();
 
@@ -1424,11 +1458,13 @@ fn test_ct_token_malformed_range_proof() {
         .previous_output(input_out_point)
         .build();
 
-    let outputs = vec![CellOutput::new_builder()
-        .capacity(1000)
-        .lock(lock_script)
-        .type_(Some(type_script))
-        .build()];
+    let outputs = vec![
+        CellOutput::new_builder()
+            .capacity(1000)
+            .lock(lock_script)
+            .type_(Some(type_script))
+            .build(),
+    ];
 
     // Random bytes that are NOT a valid RangeProof
     let malformed_proof = vec![0xDE, 0xAD, 0xBE, 0xEF, 0x12, 0x34, 0x56, 0x78];
@@ -1493,11 +1529,13 @@ fn test_ct_info_unlimited_supply_cap() {
     let new_supply = 1_000_000_000_000u128; // 1 trillion tokens
     let output_data = create_ct_info_data(new_supply, 0, MINTABLE);
 
-    let outputs = vec![CellOutput::new_builder()
-        .capacity(1000)
-        .lock(lock_script)
-        .type_(Some(type_script))
-        .build()];
+    let outputs = vec![
+        CellOutput::new_builder()
+            .capacity(1000)
+            .lock(lock_script)
+            .type_(Some(type_script))
+            .build(),
+    ];
 
     let cell_deps = vec![CellDep::new_builder().out_point(out_point).build()].pack();
 
@@ -1571,11 +1609,13 @@ fn test_ct_info_zero_mint_amount() {
     // Same supply - trying to mint 0 tokens
     let output_data = create_ct_info_data(supply, 1_000_000, MINTABLE);
 
-    let outputs = vec![CellOutput::new_builder()
-        .capacity(1000)
-        .lock(lock_script)
-        .type_(Some(type_script))
-        .build()];
+    let outputs = vec![
+        CellOutput::new_builder()
+            .capacity(1000)
+            .lock(lock_script)
+            .type_(Some(type_script))
+            .build(),
+    ];
 
     let cell_deps = vec![CellDep::new_builder().out_point(out_point).build()].pack();
 
@@ -1641,11 +1681,13 @@ fn test_ct_info_missing_mint_commitment() {
 
     let output_data = create_ct_info_data(new_supply, 1_000_000, MINTABLE);
 
-    let outputs = vec![CellOutput::new_builder()
-        .capacity(1000)
-        .lock(lock_script)
-        .type_(Some(type_script))
-        .build()];
+    let outputs = vec![
+        CellOutput::new_builder()
+            .capacity(1000)
+            .lock(lock_script)
+            .type_(Some(type_script))
+            .build(),
+    ];
 
     let cell_deps = vec![CellDep::new_builder().out_point(out_point).build()].pack();
 
@@ -1705,11 +1747,13 @@ fn test_ct_info_data_wrong_length() {
     // Wrong data length: 56 bytes instead of 57
     let invalid_data: Bytes = vec![0u8; 56].into();
 
-    let outputs = vec![CellOutput::new_builder()
-        .capacity(1000)
-        .lock(lock_script)
-        .type_(Some(type_script))
-        .build()];
+    let outputs = vec![
+        CellOutput::new_builder()
+            .capacity(1000)
+            .lock(lock_script)
+            .type_(Some(type_script))
+            .build(),
+    ];
 
     let tx = TransactionBuilder::default()
         .input(dummy_input)
@@ -1721,4 +1765,215 @@ fn test_ct_info_data_wrong_length() {
     let result = context.verify_tx(&tx, 20_000_000);
     assert_script_error(result, ct_info_error::INVALID_DATA_LENGTH);
     println!("test_ct_info_data_wrong_length: passed (correctly rejected)");
+}
+
+// ============================================================================
+// SECURITY: Token ID Spoofing Attack Test
+// ============================================================================
+
+#[test]
+fn test_ct_token_token_id_spoofing_attack() {
+    // This test demonstrates a CRITICAL VULNERABILITY:
+    // An attacker who owns any ct-info cell can mint tokens for ANY token type
+    // by using their own ct-info cell in the transaction.
+    //
+    // Attack scenario:
+    // 1. Attacker creates their own token with ct-info cell (attacker_token_id)
+    // 2. Victim has a different token (victim_token_id)
+    // 3. Attacker constructs a mint transaction:
+    //    - Input 0: Attacker's ct-info cell (attacker_token_id)
+    //    - Input 1: ct-token cell with victim_token_id
+    // 4. ct-token-type only checks code_hash, NOT token_id → BYPASSED
+    // 5. ct-info-type validates attacker's own cell → PASSES
+    // 6. Result: Attacker mints tokens for victim's token type
+    //
+    // After the fix: ct-token-type args contain the full ct_info_script_hash,
+    // which uniquely identifies the exact ct-info cell (including token_id).
+    // The attacker's ct-info cell has a different script hash, so the attack fails.
+
+    let mut context = Context::default();
+
+    // Deploy contracts
+    let ct_token_out_point = context.deploy_cell_by_name("ct-token-type");
+    let ct_info_out_point = context.deploy_cell_by_name("ct-info-type");
+    let always_success_out_point = context.deploy_cell(ALWAYS_SUCCESS.clone());
+
+    let lock_script = context
+        .build_script(&always_success_out_point, Bytes::new())
+        .unwrap();
+
+    // Create ATTACKER's ct-info cell with attacker_token_id
+    let attacker_token_id = [0xAA; 32]; // Attacker's token ID
+    let mut attacker_ct_info_args = Vec::new();
+    attacker_ct_info_args.extend_from_slice(&attacker_token_id);
+    attacker_ct_info_args.push(0); // output index
+    let attacker_ct_info_script = context
+        .build_script(&ct_info_out_point, attacker_ct_info_args.into())
+        .unwrap();
+
+    // Create VICTIM's ct-info script (different token_id)
+    let victim_token_id = [0xBB; 32]; // Victim's token ID
+    let mut victim_ct_info_args = Vec::new();
+    victim_ct_info_args.extend_from_slice(&victim_token_id);
+    victim_ct_info_args.push(0);
+    let victim_ct_info_script = context
+        .build_script(&ct_info_out_point, victim_ct_info_args.into())
+        .unwrap();
+
+    // Compute the VICTIM's ct_info_script_hash - this is what the victim's token expects
+    let victim_ct_info_script_hash = compute_script_hash(&victim_ct_info_script);
+
+    // Create ct-token-type script for VICTIM's token (expects victim's ct-info)
+    let victim_ct_token_script = context
+        .build_script(
+            &ct_token_out_point,
+            Bytes::from(victim_ct_info_script_hash.to_vec()),
+        )
+        .unwrap();
+
+    let pc_gens = PedersenGens::default();
+    let mut rng = OsRng;
+
+    // Create attacker's ct-info INPUT (they own this, so they can update it)
+    let attacker_old_supply = 0u128;
+    let attacker_new_supply = 100u128; // Attacker mints 100 of their own token
+    let attacker_ct_info_input_data = create_ct_info_data(attacker_old_supply, 1_000_000, MINTABLE);
+    let attacker_ct_info_output_data =
+        create_ct_info_data(attacker_new_supply, 1_000_000, MINTABLE);
+
+    let attacker_ct_info_input_out_point = context.create_cell(
+        CellOutput::new_builder()
+            .capacity(1000)
+            .lock(lock_script.clone())
+            .type_(Some(attacker_ct_info_script.clone()))
+            .build(),
+        attacker_ct_info_input_data,
+    );
+    let attacker_ct_info_input = CellInput::new_builder()
+        .previous_output(attacker_ct_info_input_out_point)
+        .build();
+
+    // Create VICTIM's ct-token INPUT (zero balance cell that attacker wants to mint into)
+    let v_in = Scalar::from(0u64);
+    let r_in = Scalar::random(&mut rng);
+    let c_in = pc_gens.commit(v_in, r_in);
+    let mut victim_ct_token_input_data = c_in.compress().to_bytes().to_vec();
+    victim_ct_token_input_data.extend_from_slice(&[0u8; 32]);
+
+    let victim_ct_token_input_out_point = context.create_cell(
+        CellOutput::new_builder()
+            .capacity(1000)
+            .lock(lock_script.clone())
+            .type_(Some(victim_ct_token_script.clone()))
+            .build(),
+        victim_ct_token_input_data.into(),
+    );
+    let victim_ct_token_input = CellInput::new_builder()
+        .previous_output(victim_ct_token_input_out_point)
+        .build();
+
+    // Attacker attempts to mint 100 tokens into VICTIM's token type
+    let mint_amount = 100u64;
+    let mint_scalar = Scalar::from(mint_amount);
+    let mint_commitment = pc_gens.commit(mint_scalar, Scalar::ZERO);
+
+    // Create output for victim's ct-token with 100 tokens (the attack!)
+    let r_out = r_in;
+    let v_out = Scalar::from(mint_amount);
+    let c_out = pc_gens.commit(v_out, r_out);
+    let mut victim_ct_token_output_data = c_out.compress().to_bytes().to_vec();
+    victim_ct_token_output_data.extend_from_slice(&[0u8; 32]);
+
+    // Create range proof for the output
+    let bp_gens = BulletproofGens::new(64, 1);
+    let mut prover_transcript = Transcript::new(b"ct-token-type");
+    let (proof, _) = RangeProof::prove_multiple_with_rng(
+        &bp_gens,
+        &pc_gens,
+        &mut prover_transcript,
+        &[mint_amount],
+        &[r_out],
+        32,
+        &mut rng,
+    )
+    .unwrap();
+
+    // Build the attack transaction
+    let outputs = vec![
+        // Output 0: Attacker's updated ct-info cell
+        CellOutput::new_builder()
+            .capacity(1000)
+            .lock(lock_script.clone())
+            .type_(Some(attacker_ct_info_script))
+            .build(),
+        // Output 1: Victim's ct-token cell with minted tokens
+        CellOutput::new_builder()
+            .capacity(1000)
+            .lock(lock_script)
+            .type_(Some(victim_ct_token_script))
+            .build(),
+    ];
+
+    let cell_deps = vec![
+        CellDep::new_builder().out_point(ct_info_out_point).build(),
+        CellDep::new_builder().out_point(ct_token_out_point).build(),
+    ]
+    .pack();
+
+    let tx = TransactionBuilder::default()
+        .cell_deps(cell_deps)
+        .input(attacker_ct_info_input) // Input 0: Attacker's ct-info
+        .input(victim_ct_token_input) // Input 1: Victim's ct-token
+        .outputs(outputs)
+        .outputs_data(
+            vec![
+                attacker_ct_info_output_data,
+                Bytes::from(victim_ct_token_output_data),
+            ]
+            .pack(),
+        )
+        .build();
+
+    let tx = context.complete_tx(tx);
+
+    let mint_commitment_bytes = mint_commitment.compress().to_bytes().to_vec();
+
+    // Witness 0: for ct-info-type (attacker's cell) - mint commitment in output_type
+    let witness0 = WitnessArgs::new_builder()
+        .output_type(Some(Bytes::from(mint_commitment_bytes.clone())))
+        .build();
+
+    // Witness 1: for ct-token-type (victim's cell) - mint commitment in input_type, range proof in output_type
+    let witness1 = WitnessArgs::new_builder()
+        .input_type(Some(Bytes::from(mint_commitment_bytes)))
+        .output_type(Some(proof.to_bytes().pack()))
+        .build();
+
+    let tx = tx
+        .as_advanced_builder()
+        .set_witnesses(vec![witness0.as_bytes().pack(), witness1.as_bytes().pack()])
+        .build();
+
+    // THE VULNERABILITY:
+    // Before the fix, this transaction would PASS because ct-token-type only checked
+    // that a ct-info-type cell exists (by code_hash), but didn't verify that
+    // the ct-info cell's token_id matches.
+    //
+    // After the fix, this FAILS because:
+    // - Victim's ct-token-type args contain victim_ct_info_script_hash
+    // - Attacker's ct-info cell has attacker_ct_info_script_hash (different!)
+    // - verify_ct_info_exists compares load_cell_type_hash against expected_ct_info_script_hash
+    // - No match found → MissingCtInfoType error
+
+    let result = context.verify_tx(&tx, 1_000_000_000);
+
+    // This MUST fail after the fix is applied.
+    // If this test passes (no error), the vulnerability exists!
+    assert!(
+        result.is_err(),
+        "SECURITY VULNERABILITY: Token ID spoofing attack succeeded! \
+         Attacker was able to mint tokens for victim's token type using their own ct-info cell."
+    );
+
+    println!("test_ct_token_token_id_spoofing_attack: passed (attack correctly rejected)");
 }

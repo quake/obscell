@@ -7,14 +7,13 @@ extern crate alloc;
 use bulletproofs::{BulletproofGens, PedersenGens, RangeProof};
 use ckb_std::{
     ckb_constants::Source,
-    ckb_types::prelude::Unpack,
     error::SysError,
     high_level::{
-        load_cell_data, load_cell_type_hash, load_script, load_tx_hash, load_witness_args,
-        QueryIter,
+        QueryIter, load_cell_data, load_cell_type_hash, load_script, load_tx_hash,
+        load_witness_args,
     },
 };
-use curve25519_dalek::{ristretto::CompressedRistretto, RistrettoPoint};
+use curve25519_dalek::{RistrettoPoint, ristretto::CompressedRistretto};
 use merlin::Transcript;
 
 #[cfg(not(any(feature = "library", test)))]
@@ -100,19 +99,21 @@ fn auth() -> Result<(), Error> {
     if let Some(mint_commitment_bytes) = mint_commitment_opt {
         // This is a mint transaction - MUST verify ct-info-type exists
 
-        // Load script args to get ct-info-type code_hash
+        // Load script args to get expected ct-info-type script hash
         let script = load_script()?;
         let script_args = script.args().raw_data();
 
-        // Script args format: [ct_info_code_hash: 32 bytes] + [optional: other data]
+        // Script args format: [ct_info_script_hash: 32 bytes]
+        // This is the complete script hash of the expected ct-info-type cell,
+        // which uniquely identifies the token (includes code_hash + hash_type + args/type_id)
         if script_args.len() < 32 {
             return Err(Error::InvalidScriptArgs);
         }
 
-        let ct_info_code_hash: [u8; 32] = script_args[0..32].try_into().unwrap();
+        let expected_ct_info_script_hash: [u8; 32] = script_args[0..32].try_into().unwrap();
 
-        // Verify ct-info-type exists in transaction inputs
-        let ct_info_found = verify_ct_info_exists(&ct_info_code_hash)?;
+        // Verify ct-info-type with matching script hash exists in transaction inputs
+        let ct_info_found = verify_ct_info_exists(&expected_ct_info_script_hash)?;
         if !ct_info_found {
             return Err(Error::MissingCtInfoType);
         }
@@ -225,25 +226,22 @@ impl rand_core::RngCore for TxHashRng {
 
 impl rand_core::CryptoRng for TxHashRng {}
 
-/// Verify that ct-info-type script exists in the transaction inputs.
+/// Verify that ct-info-type script exists in the transaction inputs
+/// with matching script hash.
 /// This is required for mint transactions to ensure the mint_commitment
-/// was validated by ct-info-type.
-fn verify_ct_info_exists(ct_info_code_hash: &[u8; 32]) -> Result<bool, Error> {
-    // Iterate through all inputs to find a cell with ct-info-type
+/// was validated by the correct ct-info-type cell.
+///
+/// SECURITY: By comparing the full script hash (which includes code_hash + hash_type + args),
+/// we prevent attackers from using their own ct-info cell to mint tokens for other token types.
+fn verify_ct_info_exists(expected_ct_info_script_hash: &[u8; 32]) -> Result<bool, Error> {
+    // Iterate through all inputs to find a cell with matching ct-info-type script hash
     let mut index = 0;
     loop {
         match load_cell_type_hash(index, Source::Input) {
-            Ok(Some(_type_hash)) => {
-                // Check if this cell's type script code_hash matches ct-info-type
-                // Note: load_cell_type_hash returns the script hash, not code_hash
-                // We need to use load_cell_type to get the actual script and compare code_hash
-                if let Ok(Some(type_script)) =
-                    ckb_std::high_level::load_cell_type(index, Source::Input)
-                {
-                    let code_hash: [u8; 32] = type_script.code_hash().unpack();
-                    if code_hash == *ct_info_code_hash {
-                        return Ok(true);
-                    }
+            Ok(Some(type_hash)) => {
+                // load_cell_type_hash returns the script hash directly
+                if type_hash == *expected_ct_info_script_hash {
+                    return Ok(true);
                 }
             }
             Ok(None) => {
