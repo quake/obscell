@@ -68,9 +68,10 @@ fn auth() -> Result<(), Error> {
     let inputs = QueryIter::new(load_cell_data, Source::GroupInput);
     let mut input_sum = RistrettoPoint::default();
     for i in inputs {
-        // Support both v1 (64B) and v2 (72B) cell data formats
-        // Only first 32 bytes (commitment) are used for verification
-        if i.len() < 64 {
+        // Cell data format: commitment (32B) || encrypted_payload (variable length)
+        // - commitment: Pedersen commitment (compressed RistrettoPoint), used for on-chain verification
+        // - encrypted_payload: off-chain data for recipient to decrypt (may contain amount and blinding factor)
+        if i.len() < 32 {
             return Err(Error::InvalidInput);
         }
         let point = CompressedRistretto::from_slice(&i[0..32])
@@ -84,9 +85,8 @@ fn auth() -> Result<(), Error> {
     let mut value_commitments = alloc::vec::Vec::new();
     let mut output_sum = RistrettoPoint::default();
     for i in outputs {
-        // Support both v1 (64B) and v2 (72B) cell data formats
-        // Only first 32 bytes (commitment) are used for verification
-        if i.len() < 64 {
+        // Cell data format: commitment (32B) || encrypted_payload (variable length)
+        if i.len() < 32 {
             return Err(Error::InvalidOutput);
         }
         let cr = CompressedRistretto::from_slice(&i[0..32]).or(Err(Error::InvalidOutput))?;
