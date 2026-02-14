@@ -68,14 +68,14 @@ pub const PAUSABLE: u8 = 0x04;  // Bit 2: Pausing enabled (future)
 
 **Lock Script**: Any lock (typically ALWAYS_SUCCESS or issuer-controlled)
 
-### CT-Token-Type Cell (No Changes)
+### CT-Token-Type Cell
 
-**Cell Data (64 bytes)**:
+**Cell Data (72 bytes)**:
 ```
 Offset | Size | Field       | Description
 -------|------|-------------|----------------------------------
-0      | 32   | commitment  | Pedersen commitment C = vG + rH
-32     | 32   | encrypted   | Encrypted amount data
+0      | 32   | commitment  | Pedersen commitment C = vH + rG
+32     | 40   | encrypted   | Encrypted amount (8B) + blinding (32B)
 ```
 
 **Type Script Args (32 bytes)**:

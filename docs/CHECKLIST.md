@@ -5,7 +5,7 @@
 ### Design & Documentation
 - [x] Complete design document written (`docs/ct-info-type-design.md`)
 - [x] Architecture decision documented (Approach A: separate ct-info-type)
-- [x] Cell layouts specified (57 bytes for ct-info, 64 bytes for ct-token)
+- [x] Cell layouts specified (57 bytes for ct-info, 72 bytes for ct-token)
 - [x] Validation rules defined (genesis, mint, errors)
 - [x] Transaction structures documented
 - [x] Security analysis completed
