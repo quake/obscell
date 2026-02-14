@@ -9,11 +9,11 @@ use ckb_std::{
     ckb_constants::Source,
     error::SysError,
     high_level::{
-        QueryIter, load_cell_data, load_cell_type_hash, load_script, load_tx_hash,
-        load_witness_args,
+        load_cell_data, load_cell_type_hash, load_script, load_tx_hash, load_witness_args,
+        QueryIter,
     },
 };
-use curve25519_dalek::{RistrettoPoint, ristretto::CompressedRistretto};
+use curve25519_dalek::{ristretto::CompressedRistretto, RistrettoPoint};
 use merlin::Transcript;
 
 #[cfg(not(any(feature = "library", test)))]
@@ -68,7 +68,10 @@ fn auth() -> Result<(), Error> {
     let inputs = QueryIter::new(load_cell_data, Source::GroupInput);
     let mut input_sum = RistrettoPoint::default();
     for i in inputs {
-        if i.len() != 64 {
+        // Support both v1 (64B) and v2 (72B) cell data formats
+        // v1: commitment (32B) || encrypted_amount (32B)
+        // v2: commitment (32B) || encrypted(amount + blinding) (40B)
+        if i.len() < 64 {
             return Err(Error::InvalidInput);
         }
         let point = CompressedRistretto::from_slice(&i[0..32])
@@ -82,7 +85,8 @@ fn auth() -> Result<(), Error> {
     let mut value_commitments = alloc::vec::Vec::new();
     let mut output_sum = RistrettoPoint::default();
     for i in outputs {
-        if i.len() != 64 {
+        // Support both v1 (64B) and v2 (72B) cell data formats
+        if i.len() < 64 {
             return Err(Error::InvalidOutput);
         }
         let cr = CompressedRistretto::from_slice(&i[0..32]).or(Err(Error::InvalidOutput))?;
