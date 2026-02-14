@@ -1,0 +1,37 @@
+{
+  "cell_recipes": [
+    {
+      "name": "ckb-auth",
+      "tx_hash": "0xa0e99b29fd154385815142b76668d5f4ecf30ae85bc2942bd21e9e51b9066f97",
+      "index": 0,
+      "occupied_capacity": 15103000000000,
+      "data_hash": "0x24cbc0576afd0bb1e73871363d4724d5a09f428c16090a0f2cb71de6a4221372",
+      "type_id": "0x0915983bb31584df4566e0946fd00ef1e9a75ad37a39ce70fec9b5cbf3b87021"
+    },
+    {
+      "name": "stealth-lock",
+      "tx_hash": "0x305a174d8af95368aac1768bf7b1fe7398a6cb6b04808fbbc685300403318428",
+      "index": 0,
+      "occupied_capacity": 5153400000000,
+      "data_hash": "0xaa8618bd993a830bb918c1a5a0368c4410d96400bc1379a09426041fc61ff008",
+      "type_id": "0x0dc965b5bfb6db2759275ad7d92ee502e10955cca789d001af03e3576cfe3f1c"
+    },
+    {
+      "name": "ct-info-type",
+      "tx_hash": "0x305a174d8af95368aac1768bf7b1fe7398a6cb6b04808fbbc685300403318428",
+      "index": 1,
+      "occupied_capacity": 8233400000000,
+      "data_hash": "0x9a4ed34705d789d64a29af07f0e1392f2c42dcdb47e2dcb7652e0d0da4b7a349",
+      "type_id": "0x150fdb31620455e6b2a1c2bdb44fa3b97474aedf0480c3acf8558d90e9ae156b"
+    },
+    {
+      "name": "ct-token-type",
+      "tx_hash": "0xf634c83fc4632b3490f729a72de283a76280520236fda4d59362241f03e18ea8",
+      "index": 0,
+      "occupied_capacity": 16669400000000,
+      "data_hash": "0xf59cf86fa1ca0d2e36210117bc38d41ac0d68cf926628b3dd07698c7852ef9e0",
+      "type_id": "0x708185bddbd4b22b456449235c230f74e85a26aaa720ec3eb1299843300ff34a"
+    }
+  ],
+  "dep_group_recipes": []
+}
