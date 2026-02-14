@@ -17,16 +17,40 @@ It enforces commitment equality and range proof verification, enabling fully con
 
 ## Data and Witness Structure
 
-Each CT token cell stores exactly 64 bytes in `output.data`:
+CT token cells support two `output.data` formats:
 
-1. commitment: a 32 bytes compressed ristretto commitment that hides the token amount `C = v·H + r·G`, where `v` - amount, `r` - blinding, `H, G` - fixed generators
+### Format v1 (64 bytes) - Mint cells
 
-2. encrypted_amount_and_blinding: a 32-byte encrypted payload containing v (8 bytes) || r (24 bytes) enabling receiver recovery, encrypted using a symmetric key derived from cell’s stealth lock script args.
+Used for mint operations where blinding factor is zero (enforced by ct-info-type).
+
+| Field | Size | Description |
+|-------|------|-------------|
+| commitment | 32 bytes | Compressed Ristretto point `C = v·G` (blinding = 0) |
+| encrypted_amount | 32 bytes | XOR-encrypted amount with verification material |
+
+### Format v2 (72 bytes) - Transfer cells
+
+Used for transfer operations where blinding factors are non-zero.
+
+| Field | Size | Description |
+|-------|------|-------------|
+| commitment | 32 bytes | Compressed Ristretto point `C = v·H + r·G` |
+| encrypted_payload | 40 bytes | XOR-encrypted `amount (8B) \|\| blinding (32B)` |
+
+The contract accepts any cell data >= 64 bytes and only reads the first 32 bytes (commitment) for verification.
+
+### Encryption Details
+
+```
+key = SHA512("ct-amount-blinding-encryption" || shared_secret)[0..40]
+encrypted_payload = (amount_le_bytes || blinding_bytes) XOR key
+```
 
 Receiver (Wallet) to recover balance metadata:
 
-1. Compute DH shared secret from the lock script args. (DONE in stealth script wallet demo)
-2. Decrypt: key = H(shared), plaintext = encrypted_amount_and_blinding XOR key, v = plaintext[0..8), r = plaintext[8..32)
+1. Compute DH shared secret from the lock script args (ephemeral pubkey in stealth-lock)
+2. Decrypt using the same key derivation
+3. Verify: `commitment == commit(amount, blinding)` to confirm correctness
 
 On-Chain Verification (CT Token Type Script):
 
