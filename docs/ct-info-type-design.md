@@ -70,12 +70,12 @@ pub const PAUSABLE: u8 = 0x04;  // Bit 2: Pausing enabled (future)
 
 ### CT-Token-Type Cell
 
-**Cell Data (72 bytes)**:
+**Cell Data (>= 32 bytes)**:
 ```
-Offset | Size | Field       | Description
--------|------|-------------|----------------------------------
-0      | 32   | commitment  | Pedersen commitment C = vH + rG
-32     | 40   | encrypted   | Encrypted amount (8B) + blinding (32B)
+Offset | Size     | Field       | Description
+-------|----------|-------------|----------------------------------
+0      | 32       | commitment  | Pedersen commitment C = vH + rG
+32     | variable | encrypted   | Off-chain data (may contain amount + blinding)
 ```
 
 **Type Script Args (32 bytes)**:

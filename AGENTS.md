@@ -195,7 +195,7 @@ include!(concat!(env!("OUT_DIR"), "/generated.rs"));
 - Use `//` for inline comments
 - Document complex cryptographic operations with references
 - Include cycle consumption in test outputs
-- Document fixed data layouts (e.g., "Cell data: 72 bytes = 32B commitment + 40B encrypted")
+- Document fixed data layouts (e.g., "Cell data: >= 32 bytes, first 32B is commitment")
 
 ## Contract-Specific Notes
 
@@ -205,13 +205,13 @@ include!(concat!(env!("OUT_DIR"), "/generated.rs"));
 - Auth via `exec_cell` with algorithm ID, signature, message, pubkey hash
 
 ### CT Token Type (`contracts/ct-token-type/`)
-- Cell data: 72 bytes (32B compressed Ristretto commitment + 40B encrypted amount/blinding)
+- Cell data: >= 32 bytes (first 32B is compressed Ristretto commitment, rest is off-chain encrypted data)
 - Validates Bulletproofs range proofs in witness data
 - Uses Pedersen commitments for confidential amounts
 
 ### CT Info Type (`contracts/ct-info-type/`)
-- Manages token issuance metadata
-- TODO: Should be merged with ct-token-type (work in progress)
+- Manages token issuance and supply tracking
+- Cell data: 57 bytes (supply, cap, flags)
 
 ## Common Pitfalls
 - ❌ Don't use `std` - this is `no_std` environment

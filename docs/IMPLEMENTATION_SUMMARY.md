@@ -7,7 +7,7 @@
 
 Complete technical design document covering:
 - Architecture decision (Approach A: separate ct-info-type)
-- Cell layouts (57 bytes for ct-info-type, 72 bytes for ct-token-type)
+- Cell layouts (57 bytes for ct-info-type, >= 32 bytes for ct-token-type)
 - Validation rules (genesis, mint, error cases)
 - Transaction structures (genesis, pure mint, mint+transfer)
 - Cryptographic details (mint commitments)
@@ -125,10 +125,10 @@ Validation (ct-token-type):
 [56]      flags: u8                 (bit 0 = MINTABLE)
 ```
 
-### CT-Token-Type Cell (72 bytes)
+### CT-Token-Type Cell (>= 32 bytes)
 ```
 [0..32]   commitment: [u8; 32]      (Pedersen commitment)
-[32..72]  encrypted: [u8; 40]       (encrypted amount 8B + blinding 32B)
+[32..]    encrypted: variable       (off-chain data for recipient)
 ```
 
 ## Transaction Examples

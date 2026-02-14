@@ -17,16 +17,16 @@ It enforces commitment equality and range proof verification, enabling fully con
 
 ## Data and Witness Structure
 
-CT token cells use a unified `output.data` format (72 bytes):
+CT token cells use the following `output.data` format (>= 32 bytes):
 
 | Field | Size | Description |
 |-------|------|-------------|
 | commitment | 32 bytes | Compressed Ristretto point `C = v·H + r·G` |
-| encrypted_payload | 40 bytes | XOR-encrypted `amount (8B) \|\| blinding (32B)` |
+| encrypted_payload | variable | Off-chain data for recipient (may contain amount and blinding factor) |
 
 **Note:** For mint operations, blinding factor is zero (enforced by ct-info-type), so commitment becomes `C = v·H`.
 
-The contract accepts any cell data >= 72 bytes and only reads the first 32 bytes (commitment) for verification.
+The contract accepts any cell data >= 32 bytes and only reads the first 32 bytes (commitment) for on-chain verification. The remaining bytes are for off-chain decryption by the recipient.
 
 ### Encryption Details
 
